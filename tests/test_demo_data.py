@@ -258,3 +258,45 @@ def test_a_model_that_merely_has_extra_attributes_is_still_ours() -> None:
         }
     }
     demo_data.check_model_is_ours(widened, spec)
+
+
+@pytest.mark.parametrize("model_key", ALL_MODELS)
+def test_the_business_key_is_never_a_per_system_number(model_key: str) -> None:
+    """The bug this guards: keying a model on the number each system assigns mints one
+    entity per system, and deterministic resolution has nothing left to resolve. A business
+    key has to be an identifier the systems SHARE."""
+    spec = demo_data.MODEL_SPECS[model_key]
+    per_system = {source.key_attribute for source in spec.sources}
+    for key in spec.definition["keys"]:
+        assert not (set(key["attributes"]) & per_system), (
+            f"{spec.name} keys on {key['attributes']}, which is a source's own key"
+        )
+
+
+@pytest.mark.parametrize("model_key", ALL_MODELS)
+def test_the_business_key_is_carried_by_at_least_two_systems(model_key: str) -> None:
+    """A shared key only resolves across systems if more than one system delivers it."""
+    spec = demo_data.MODEL_SPECS[model_key]
+    for key in spec.definition["keys"]:
+        for attribute in key["attributes"]:
+            carriers = [s.name for s in spec.sources if attribute not in s.drops]
+            assert len(carriers) >= 2, f"{spec.name}: only {carriers} carry '{attribute}'"
+
+
+@pytest.mark.parametrize("model_key", ALL_MODELS)
+def test_match_config_compares_attributes_the_model_actually_has(model_key: str) -> None:
+    spec = demo_data.MODEL_SPECS[model_key]
+    attributes = {a["name"] for a in spec.definition["attributes"]}
+    assert spec.match, f"{spec.name} has no match config — key-less records would not resolve"
+    assert set(spec.match["attributes"]) <= attributes
+    assert spec.match["blocking"]["attribute"] in attributes
+    assert spec.match["review_threshold"] <= spec.match["auto_threshold"]
+
+
+def test_a_system_without_the_business_key_still_reaches_matching() -> None:
+    """The webshop is the reason the match config exists: it carries no registration number,
+    so its records arrive unlinked and only probabilistic matching can place them."""
+    spec = demo_data.MODEL_SPECS["customer"]
+    webshop = next(s for s in spec.sources if s.name == "webshop")
+    assert "org_number" in webshop.drops
+    assert set(spec.match["attributes"]) - set(webshop.drops), "webshop carries nothing to match on"

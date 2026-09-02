@@ -125,21 +125,36 @@ Bootstrapping needs `workspace:create`, `domain:create`, `data-model:create`,
 ```
 source                  accepted  quarantined
 ---------------------------------------------
-crm                           36            4
-erp                           26            8
-webshop                       14            2
+crm                           53            3
+erp                           41            4
+webshop                       25            1
 ...
 
 model                   source records  golden entities
 -------------------------------------------------------
-Customer                            76               76
+Customer                           119               58
+Supplier                            32               20
 ```
 
-One golden entity per source record means **no match rules are configured yet** — the
-duplicates this script generates on purpose are all still sitting there unlinked. Set up
-matching for a model — `PUT /v1/match/config/{model_name}`, or the matching editor in the
-app — and saving the config re-resolves the model, dropping the entity count below the
-source-record count. That is the demo worth showing.
+**Golden entities well below source records is the point** — that gap is every duplicate
+the generator planted, found and merged. From the run above: 106 entities out of 204
+records, 71 of them built from more than one record, none left unlinked, and 33 ambiguous
+pairs queued for a steward rather than merged silently.
+
+It resolves in two stages, and the generated data is shaped to exercise both:
+
+- **Deterministic (KEY).** Each model's business key is the identifier the systems *share* —
+  the registration number for customers and suppliers, the GTIN for products — never the
+  customer or article number each system assigns itself. Records carrying it link exactly,
+  across systems and across a re-keyed intra-source duplicate.
+- **Probabilistic (IDR).** The webshop holds no registration number, and noise drops it from
+  a few records elsewhere. Those arrive with no usable key and reach matching, which scores
+  them on name, address, e-mail and phone and either auto-links, queues the pair for review,
+  or mints a new entity. The script installs that match config as part of bootstrap.
+
+If you key a model on the number each system assigns, deterministic resolution mints one
+entity per system and matching never runs — one entity per record, and nothing to show. That
+is a modelling mistake, not a tuning problem, and it is worth seeing once.
 
 Ingest is asynchronous. Without `--wait` the script returns as soon as the batches are
 accepted, and the records appear a few seconds later.
