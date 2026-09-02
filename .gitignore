@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Claude Code worktrees. Each one is its own git repository, so committing the path adds
+# a gitlink rather than files — and `git add -A` picks it up silently.
+.claude/worktrees/
