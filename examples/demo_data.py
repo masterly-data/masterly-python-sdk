@@ -189,7 +189,11 @@ CUSTOMER_DEFINITION: dict[str, Any] = {
         {"name": "employees", "type": "number", "min_value": 0, "max_value": 500000},
         {"name": "customer_since", "type": "date"},
     ],
-    "keys": [{"name": "customer_number", "attributes": ["customer_number"]}],
+    # The business key is the registration number, NOT `customer_number`. Each system has
+    # its own customer number, so keying on it mints one entity per system — deterministic
+    # resolution would have nothing to resolve. The registration number is the identifier
+    # the systems actually share, which is what makes it a business key.
+    "keys": [{"name": "org_number", "attributes": ["org_number"]}],
 }
 
 SUPPLIER_DEFINITION: dict[str, Any] = {
@@ -213,7 +217,7 @@ SUPPLIER_DEFINITION: dict[str, Any] = {
         {"name": "contract_start", "type": "date"},
         {"name": "spend_ytd_sek", "type": "number", "min_value": 0},
     ],
-    "keys": [{"name": "supplier_number", "attributes": ["supplier_number"]}],
+    "keys": [{"name": "org_number", "attributes": ["org_number"]}],
 }
 
 PRODUCT_DEFINITION: dict[str, Any] = {
@@ -234,7 +238,8 @@ PRODUCT_DEFINITION: dict[str, Any] = {
          "description": "The supplying vendor's number — links a product to a Supplier"},
         {"name": "launch_date", "type": "date"},
     ],
-    "keys": [{"name": "sku", "attributes": ["sku"]}],
+    # Each system has its own article number; the GTIN is the one both print on the box.
+    "keys": [{"name": "gtin", "attributes": ["gtin"]}],
 }
 
 
@@ -278,6 +283,12 @@ class ModelSpec:
     description: str
     sources: tuple[SourceSpec, ...]
     defects: tuple[Defect, ...]
+    # Probabilistic matching for the records the business key cannot resolve — a system that
+    # does not carry the registration number, or a record where it is missing. Blocking is on
+    # `city` because the normalizer lowercases and collapses whitespace but does not remove
+    # it: the ERP's upper-cased city still blocks with the CRM's, while `111 22` and `11122`
+    # would not have.
+    match: dict[str, Any] = field(default_factory=dict)
 
 
 CUSTOMER_SOURCES = (
@@ -419,6 +430,12 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             Defect("revenue delivered as text", "annual_revenue_sek", "unknown"),
             Defect("no natural key", "customer_number", None),
         ),
+        match={
+            "attributes": ["name", "street", "postal_code", "city", "email", "phone"],
+            "auto_threshold": 0.86,
+            "review_threshold": 0.66,
+            "blocking": {"attribute": "city", "strategy": "first-token"},
+        },
     ),
     "supplier": ModelSpec(
         name="Supplier",
@@ -432,6 +449,12 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             Defect("negative YTD spend", "spend_ytd_sek", -4500),
             Defect("no natural key", "supplier_number", None),
         ),
+        match={
+            "attributes": ["name", "street", "postal_code", "city", "email", "phone"],
+            "auto_threshold": 0.86,
+            "review_threshold": 0.66,
+            "blocking": {"attribute": "city", "strategy": "first-token"},
+        },
     ),
     "product": ModelSpec(
         name="Product",
@@ -445,6 +468,12 @@ MODEL_SPECS: dict[str, ModelSpec] = {
             Defect("required name empty", "name", ""),
             Defect("no natural key", "sku", None),
         ),
+        match={
+            "attributes": ["name", "brand", "category", "uom"],
+            "auto_threshold": 0.9,
+            "review_threshold": 0.72,
+            "blocking": {"attribute": "category", "strategy": "first-token"},
+        },
     ),
 }
 
@@ -851,6 +880,30 @@ def adaptive_value(
             return f"{stem} {qualifier}"
 
 
+def unique_key_value(attribute: dict[str, Any], index: int) -> tuple[str, bool]:
+    """A unique value for a key attribute that also satisfies its format, if it has one.
+
+    A key has to be unique per record, which rules out the name-based heuristics — and it
+    often carries a format (a GTIN is exactly thirteen digits). So try a few structurally
+    different unique shapes and take the first the constraint accepts. Returns the value and
+    whether the format could be satisfied; an unsatisfiable key is still emitted, because a
+    record with no key at all quarantines just the same and says less about why.
+    """
+    candidates = [
+        f"DEMO-{index:06d}",
+        f"{index:013d}",
+        f"{index:08d}",
+        f"{index:d}",
+    ]
+    pattern = attribute.get("regex")
+    if not pattern:
+        return candidates[0], True
+    for candidate in candidates:
+        if re.search(pattern, candidate):
+            return candidate, True
+    return candidates[0], False
+
+
 def build_adaptive_records(
     definition: dict[str, Any],
     key_attributes: list[str],
@@ -889,6 +942,7 @@ def build_adaptive_records(
                 )
 
     records: list[dict[str, Any]] = []
+    unsatisfiable_keys: set[str] = set()
     for index in range(1, count + 1):
         record: dict[str, Any] = {}
         for attribute in attributes:
@@ -896,8 +950,14 @@ def build_adaptive_records(
             if name in skip:
                 continue
             if name in key_attributes:
-                record[name] = f"DEMO-{index:06d}" if len(key_attributes) == 1 \
-                    else f"DEMO-{name}-{index:06d}"
+                value, satisfied = unique_key_value(attribute, index)
+                record[name] = value if len(key_attributes) == 1 else f"{value}-{name}"
+                if not satisfied and name not in unsatisfiable_keys:
+                    unsatisfiable_keys.add(name)
+                    warnings.append(
+                        f"'{name}' is the natural key and has a format this generator cannot "
+                        f"satisfy ({attribute['regex']}) — those records will quarantine"
+                    )
                 continue
             value = adaptive_value(attribute, rng, index)
             if value is None:
@@ -1044,14 +1104,32 @@ def check_model_is_ours(model: dict[str, Any], spec: ModelSpec) -> None:
     )
 
 
+def _keys_of(definition: dict[str, Any]) -> list[list[str]]:
+    return [list(k.get("attributes", [])) for k in definition.get("keys", [])]
+
+
 def ensure_model(client: Client, domain_id: str, spec: ModelSpec) -> dict[str, Any]:
-    for model in client.data_models.list():
-        if model["name"] == spec.name:
-            check_model_is_ours(model, spec)
-            if model["status"] == "draft":
-                client.data_models.publish(spec.name)
-                print(f"  published existing Data Model '{spec.name}'")
-            return dict(model)
+    for listed in client.data_models.list():
+        if listed["name"] != spec.name:
+            continue
+        check_model_is_ours(listed, spec)
+        # Ours, but possibly from an older run of this script. A stale business key is not
+        # cosmetic — it decides whether deterministic resolution has anything to resolve —
+        # so bring the definition up to date. Read first: the write states the revision it
+        # replaces, and a concurrent edit is refused rather than overwritten.
+        model = client.data_models.get(spec.name)
+        if _keys_of(model["definition"]) != _keys_of(spec.definition):
+            model = client.data_models.update(
+                spec.name, definition=spec.definition, if_match=model["version"]
+            )
+            # Changing a business key is a breaking change, and a production Environment
+            # refuses it outright — which is correct: this script is not for production.
+            client.data_models.publish(spec.name, allow_breaking=True)
+            print(f"  updated Data Model '{spec.name}' — business key was stale")
+        elif model["status"] == "draft":
+            client.data_models.publish(spec.name)
+            print(f"  published existing Data Model '{spec.name}'")
+        return dict(model)
     created = client.data_models.create(
         spec.name,
         domain=domain_id,
@@ -1100,6 +1178,25 @@ def ensure_source(client: Client, spec: SourceSpec, model_name: str) -> dict[str
     )
     print(f"  created Source '{spec.name}' -> {model_name}")
     return dict(created)
+
+
+def ensure_match_config(client: Client, spec: ModelSpec) -> None:
+    """Install the probabilistic matching for what the business key cannot resolve.
+
+    Deterministic resolution links the records that carry the shared registration number.
+    Everything else — the webshop, which never had one, and records where it went missing —
+    reaches identity resolution unlinked, and without a match config it simply mints a new
+    entity each time. There is no typed method for this yet, so it goes through the client's
+    escape hatch.
+    """
+    if not spec.match:
+        return
+    current = client.request("GET", f"/v1/match/config/{spec.name}")
+    if current == spec.match:
+        return
+    client.request("PUT", f"/v1/match/config/{spec.name}", json=spec.match)
+    thresholds = f"auto {spec.match['auto_threshold']}, review {spec.match['review_threshold']}"
+    print(f"  match config for '{spec.name}' ({thresholds})")
 
 
 def require_source(client: Client, name: str) -> dict[str, Any]:
@@ -1343,6 +1440,7 @@ def main(argv: list[str] | None = None) -> int:
                 for model_key in args.models:
                     model_spec = MODEL_SPECS[model_key]
                     ensure_model(client, domain_id, model_spec)
+                    ensure_match_config(client, model_spec)
                     for source_spec in model_spec.sources:
                         ensure_source(client, source_spec, model_spec.name)
 
