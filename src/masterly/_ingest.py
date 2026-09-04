@@ -41,7 +41,12 @@ class SourcesApi:
         self._client = client
 
     def list(self) -> list[dict[str, Any]]:
-        """Every Source registered in this Environment."""
+        """Every Source registered in this Environment. Session persona only."""
+        self._client._require_session(
+            "listing Sources",
+            "A service account is told which Sources it may push into by its `ingest` scope; "
+            "keep those ids in the job's configuration.",
+        )
         return all_items(self._client, "/v1/sources")
 
     def get(self, source: str) -> dict[str, Any]:
@@ -121,9 +126,14 @@ class SourcesApi:
         return stats
 
     def _resolve(self, source: str) -> str:
-        """Accept a source id (``src_…``) or its exact name."""
+        """Accept a source id (``src_…``) or its exact name (a name costs a listing, which is
+        a session route — so a service-account connection must pass the id)."""
         if source.startswith("src_"):
             return source
+        self._client._require_session(
+            f"addressing Source '{source}' by name",
+            "Pass the source id (`src_…`) that the account's `ingest` scope names instead.",
+        )
         matches = [s for s in self.list() if s.get("name") == source]
         if not matches:
             raise LookupError(f"no source named '{source}'")
@@ -141,6 +151,12 @@ class SourcesApi:
 
         Re-delivery is safe: records upsert by their source key, so running the same
         notebook twice never duplicates data.
+
+        Both token personas ingest (:meth:`~masterly.Client.for_service_account`): a session
+        token holding ``ingest:run`` may target any Source in its Environment, and a service
+        account only the ids its ``ingest`` scope names — anything else raises
+        :class:`~masterly.ApiError` with code ``SERVICE_ACCOUNT_SCOPE_DENIED``. A machine
+        connection must pass ``source`` as an id, since resolving a name means listing.
         """
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")

@@ -103,15 +103,25 @@ class ProductsApi:
         self._client = client
 
     def list(self) -> list[dict[str, Any]]:
-        """Every data product visible to the caller."""
+        """Every data product visible to the caller. Session persona only — the catalogue is a
+        session route, while reading a product's rows is what a service account is for."""
+        self._client._require_session(
+            "listing data products",
+            "Keep the product ids (`dp_…`) the account consumes in the job's configuration.",
+        )
         page = self._client._request("GET", "/v1/data-products")
         items: list[dict[str, Any]] = page.get("items", [])
         return items
 
     def _resolve(self, product: str) -> str:
-        """Accept a product id (``dp_…``) or its exact name."""
+        """Accept a product id (``dp_…``) or its exact name (a name costs a listing, which is a
+        session route — so a service-account connection must pass the id)."""
         if product.startswith("dp_"):
             return product
+        self._client._require_session(
+            f"addressing data product '{product}' by name",
+            "Pass the product id (`dp_…`) instead.",
+        )
         matches = [p for p in self.list() if p.get("name") == product]
         if not matches:
             raise LookupError(f"no data product named '{product}'")
@@ -119,7 +129,13 @@ class ProductsApi:
         return product_id
 
     def read(self, product: str, **params: Any) -> RowPages:
-        """Every row of a published product, cursor-paged behind the iterator."""
+        """Every row of a published product, cursor-paged behind the iterator.
+
+        The consume path authenticates a **service account** and no one else, so this is a
+        :meth:`~masterly.Client.for_service_account` connection's read: rows arrive shaped by
+        the access policies of the principal the account is linked to, and every read is
+        metered and audited against it.
+        """
         product_id = self._resolve(product)
         return RowPages(self._client, f"/v1/consume/products/{product_id}", params)
 
