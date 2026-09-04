@@ -9,6 +9,7 @@ otherwise the demo data lies about what it is exercising.
 from __future__ import annotations
 
 import importlib.util
+import json
 import random
 import re
 import sys
@@ -16,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "examples" / "demo_data.py"
@@ -300,3 +302,100 @@ def test_a_system_without_the_business_key_still_reaches_matching() -> None:
     webshop = next(s for s in spec.sources if s.name == "webshop")
     assert "org_number" in webshop.drops
     assert set(spec.match["attributes"]) - set(webshop.drops), "webshop carries nothing to match on"
+
+
+# --- running as a machine ----------------------------------------------------------------
+
+
+def _patch_client(monkeypatch: pytest.MonkeyPatch, handler: Any) -> None:
+    """Give every client the script builds a mock transport, so `main` runs end to end."""
+    real = demo_data.Client
+
+    class Patched(real):  # type: ignore[valid-type, misc]
+        def __init__(
+            self, base_url: str, token: str, environment: str | None = None, **kwargs: Any
+        ) -> None:
+            super().__init__(base_url, token, environment, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(demo_data, "Client", Patched)
+
+
+def test_a_service_account_run_only_ingests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No bootstrap, no listing, no Environment header — just records into the Source its
+    scope names, addressed by the id the run was handed."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(202, json={"job_id": "job_1"})
+
+    _patch_client(monkeypatch, handler)
+    exit_code = demo_data.main([
+        "--base-url", "https://masterly.test",
+        "--service-account-token", "m2m:dev:svc_example",
+        "--source-id", "crm=src_1",
+        "--models", "customer", "--customers", "5",
+    ])
+
+    assert exit_code == 0
+    assert {(r.method, r.url.path) for r in seen} == {("POST", "/v1/ingest")}
+    assert all("x-masterly-environment" not in r.headers for r in seen)
+    assert all(json.loads(r.content)["source_id"] == "src_1" for r in seen)
+
+
+def test_a_service_account_run_asserts_the_environment_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(202, json={"job_id": "job_1"})
+
+    _patch_client(monkeypatch, handler)
+    demo_data.main([
+        "--base-url", "https://masterly.test",
+        "--service-account-token", "m2m:dev:svc_example",
+        "--environment", "env_prod_eu",
+        "--source-id", "crm=src_1",
+        "--models", "customer", "--customers", "2",
+    ])
+    assert seen[-1].headers["x-masterly-environment"] == "env_prod_eu"
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ([], "cannot list an Environment"),
+        (["--source-id", "crm=src_1", "--wait"], "--wait polls"),
+        (["--source-id", "crm=src_1", "--model", "Customer", "--source", "crm"], "--model reads"),
+        (["--source-id", "crm=src_1", "--token", "tok"], "not both"),
+        (["--source-id", "crm=src_1", "--models", "supplier"], "names no Source"),
+    ],
+)
+def test_what_a_service_account_cannot_do_is_said_before_the_run(
+    monkeypatch: pytest.MonkeyPatch, extra: list[str], expected: str
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("nothing may be sent")
+
+    _patch_client(monkeypatch, handler)
+    with pytest.raises(SystemExit, match=expected):
+        demo_data.main(
+            ["--base-url", "https://masterly.test",
+             "--service-account-token", "m2m:dev:svc_example", *extra]
+        )
+
+
+@pytest.mark.parametrize(
+    ("pair", "expected"),
+    [
+        ("crm", "NAME=src_"),
+        ("nosuch=src_1", "not one of the built-in Sources"),
+        ("crm=crm", "wants the Source's id"),
+    ],
+)
+def test_source_id_mappings_are_checked(pair: str, expected: str) -> None:
+    with pytest.raises(SystemExit, match=expected):
+        demo_data.parse_source_ids([pair])
+    assert demo_data.parse_source_ids(["crm=src_1"]) == {"crm": "src_1"}

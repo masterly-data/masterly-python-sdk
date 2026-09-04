@@ -97,6 +97,10 @@ uv run examples/demo_data.py --base-url … --token "$MASTERLY_TOKEN" --no-boots
 # ingest into a model of your own, generated from its live definition
 uv run examples/demo_data.py --base-url … --token "$MASTERLY_TOKEN" \
     --model "Customer 360" --source crm --records 500
+
+# as a machine — a service account, delivering into the Sources its scope names
+uv run examples/demo_data.py --base-url … \
+    --service-account-token "$MASTERLY_SERVICE_ACCOUNT_TOKEN" --source-id crm=src_7f3c9a
 ```
 
 `--model` reads the model's definition from the install and invents values that fit it —
@@ -117,6 +121,33 @@ Bootstrapping needs `workspace:create`, `domain:create`, `data-model:create`,
 `data-model:update`, `source:create` and `ingest:run` in the target Environment — the
 **Modeler** preset role covers all six. With `--no-bootstrap` or `--model`, an
 **Integrator** is enough.
+
+### Running it as a machine
+
+`--service-account-token` (or `MASTERLY_SERVICE_ACCOUNT_TOKEN`) runs the seeder as a
+**service account** rather than as a person — a scheduled top-up, or a pipeline that keeps a
+demo Environment stocked without anybody's session sitting in it. See [Two token
+personas](../README.md#two-token-personas) for what a service account is and how one is
+created.
+
+It does one thing in that persona: deliver records. Configuration is a session's work, so
+the Environment must already hold the models and Sources — bootstrap is skipped, and the run
+says so. And because a service account cannot list an Environment, it is handed the Source
+ids its `ingest` scope names:
+
+```bash
+uv run examples/demo_data.py \
+    --base-url https://app.example.com \
+    --service-account-token "$MASTERLY_SERVICE_ACCOUNT_TOKEN" \
+    --source-id crm=src_7f3c9a --source-id erp=src_31b8d2 \
+    --customers 300
+```
+
+Sources the run does not name are skipped, with a line saying which. The account is pinned to
+its Environment, so `--environment` is not needed — pass it and the run *asserts* it, and the
+server refuses the delivery rather than loading a different Environment than the one intended.
+`--wait` and `--model` are refused up front: reading a Source's counters, counting golden
+entities and reading a Data Model's definition all need a session.
 
 ## After the run
 
