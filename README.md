@@ -6,38 +6,137 @@ Microsoft Fabric, or anywhere else your pipelines run.
 ```python
 from masterly import Client
 
+# A signed-in person: configuration, golden records, ingest.
 client = Client(
     base_url="https://app.example.com",       # your Masterly install
-    token="<session or service-account token>",
+    token="<your session token>",
     environment="env_prod_eu",
 )
 
-# Extract: page through a data product (cursor-managed for you)
-for row in client.products.read("Customer 360"):
-    ...
-
-# Or straight into a DataFrame
-df = client.products.read("Customer 360").to_pandas()
-
-# Follow the change feed with a resumable cursor
-feed = client.products.changes("Customer 360", cursor=saved_cursor)
-for change in feed:
-    ...
-save(feed.cursor)  # persist for the next run
-
-# Ingest: deliver records to a source (chunked automatically)
+# Ingest: deliver records to a Source, by name or id (chunked automatically)
 report = client.sources.ingest("crm", records)
 print(report.records, "records in", report.batches, "batches")
 ```
 
-## Tokens: two personas
+```python
+# A machine running unattended: a service account, pinned to its Environment and confined
+# to what it was granted. This is the persona that reads published data products.
+job = Client.for_service_account("https://app.example.com", token="<service-account token>")
 
-- **Consumer** (extract in a Databricks/Fabric job): use a **service-account token**
-  (minted under Users → Service accounts). It pins its Environment and consumes published
-  products — reference them **by product id** (`dp_…`), since listing products needs a
-  session. Access policies (row rules, masks) apply per consumer automatically.
-- **Integrator** (ingest + golden reads): use a **session token**. Sources and products can
-  be referenced by name.
+# Extract: page through a data product (cursor-managed for you)
+for row in job.products.read("dp_a1b2c3"):
+    ...
+
+# Or straight into a DataFrame
+df = job.products.read("dp_a1b2c3").to_pandas()
+
+# Follow the change feed with a resumable cursor
+feed = job.products.changes("dp_a1b2c3", cursor=saved_cursor)
+for change in feed:
+    ...
+save(feed.cursor)  # persist for the next run
+
+# Ingest, on a schedule: only the Sources this account's `ingest` scope names
+job.sources.ingest("src_7f3c9a", records)
+```
+
+## Two token personas
+
+Every call carries a bearer token, and Masterly issues two kinds. Which one you hold decides
+what you can reach — and, for the machine one, *where*.
+
+|  | Session token | Service-account token |
+|---|---|---|
+| Belongs to | a signed-in person | a machine: a scheduled job, a notebook that runs unattended |
+| Environment | you name it on the connection | pinned to the account; the connection names none |
+| Configuration, golden records, listings | yes, as far as your role allows | no — those are session routes |
+| Ingest | any Source in the Environment, with the `ingest:run` permission | only the Sources its `ingest` scope names |
+| Read a data product's rows | no | yes, shaped by its linked access principal's policies |
+| Addressing things | by id **or** by name | by **id** — resolving a name means listing |
+| Ends | when the session expires | when an administrator revokes the account |
+
+### A session token
+
+Yours, from signing in. It is scoped to one Organization, and you tell the client which
+Environment you are working in:
+
+```python
+client = Client("https://app.example.com", token, environment="env_prod_eu")
+client.data_models.publish("Customer")
+client.sources.ingest("crm", records)          # needs the `ingest:run` permission
+```
+
+Where it comes from depends on how your install authenticates people — your identity provider,
+through the app. An install running the **dev identity binding** (local development, and demo
+installs) mints one from an e-mail address instead, which is what `examples/demo_data.py`
+does behind `--dev-login`:
+
+```python
+session = httpx.post(
+    "http://localhost:8001/v1/auth/sessions", json={"idp_token": "dev:you@example.com"}
+).json()
+token = session["session_token"]
+```
+
+It expires, and it carries a person's authority over everything they can reach. It does not
+belong in a scheduled job — that is what the other persona is for.
+
+### A service-account token
+
+A **service account** is a machine principal created against exactly one Environment. It carries
+two things: a link to an *access principal*, which decides which rows and columns of a published
+product it may see, and an optional `ingest` **scope** naming exactly the Sources it may push
+into. It cannot be pointed anywhere else, so a token that leaks in a job's environment file
+cannot load a different Environment or a Source nobody granted it.
+
+```python
+from masterly import Client
+
+client = Client.for_service_account("https://app.example.com", token)
+
+client.sources.ingest("src_7f3c9a", records)   # a Source its `ingest` scope names
+client.products.read("dp_a1b2c3")              # a product its access principal may consume
+```
+
+No Environment id: the account is pinned to its own. Pass `environment="env_prod_eu"` anyway if
+the job should *assert* which Environment it believes it is loading — the server refuses the
+call rather than loading the other one.
+
+**How to get one.** Someone who can manage service accounts in that Environment (the Integrator
+role and above) creates it. An account with an `ingest` scope is created over the API, because
+the scope names ids:
+
+```python
+credential = admin.request("POST", "/v1/service-accounts", json={
+    "name": "databricks-nightly-load",
+    "linked_principal_id": "prn_9d41f0",       # the access principal it consumes as
+    "scopes": [{"kind": "ingest", "source_ids": ["src_7f3c9a"]}],
+})
+credential["token"]        # shown once — put it straight into your secret manager
+```
+
+Leave `scopes` out and the account is consume-only. The app's **Access → Service accounts**
+screen lists the Environment's accounts and revokes them
+(`DELETE /v1/service-accounts/{service_account_id}`).
+
+What `credential["token"]` holds depends on the install. On the dev identity binding it *is* the
+token to present (it looks like `m2m:dev:svc_example`). With a real identity provider the
+account is an OAuth2 client there: your job runs the client-credentials grant against the IdP and
+presents the access token it issues — Masterly verifies that token and maps the client back to
+the account. Either way it goes in the `token` argument above.
+
+**When it is refused.**
+
+| What happened | What comes back |
+|---|---|
+| A Source the `ingest` scope does not name | `ApiError`, 403 `SERVICE_ACCOUNT_SCOPE_DENIED` |
+| An `environment=` the account is not pinned to | `ApiError`, 403 `SERVICE_ACCOUNT_SCOPE_DENIED` |
+| The account was revoked, or is unknown | `ApiError`, 401 `SERVICE_ACCOUNT_INVALID` |
+| A session route — a listing, configuration, golden records, a Source's counters | `ApiError`, 401 `UNAUTHENTICATED` |
+| A Source or product addressed by name | `PermissionError`, before anything is sent |
+
+Scopes are fixed when the account is created. Widening one is not a permission someone grants
+after the fact — it is a new account, and the old one is revoked.
 
 ## Governed writes: state the revision you are replacing
 
