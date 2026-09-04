@@ -1,0 +1,33 @@
+# Gates every pull request and every push to main. The package ships to PyPI from
+# release.yml, which builds whatever is on the tag — so this is the only place the
+# code is actually checked before it can get there.
+#
+# The floor is `requires-python` in pyproject: a client library is compiled by its
+# consumers' interpreters, not ours, so the oldest supported one has to run the suite.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ends of the supported range. The versions between them share a bytecode
+        # generation with one of these two; widening the matrix buys little for the minutes.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync
+      - run: uv run ruff check
+      # Strict, and on the package rather than the tests: a public client's types are
+      # part of its contract.
+      - run: uv run mypy src
+      - run: uv run pytest -q
