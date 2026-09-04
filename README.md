@@ -51,7 +51,7 @@ what you can reach — and, for the machine one, *where*.
 | Environment | you name it on the connection | pinned to the account; the connection names none |
 | Configuration, golden records, listings | yes, as far as your role allows | no — those are session routes |
 | Ingest | any Source in the Environment, with the `ingest:run` permission | only the Sources its `ingest` scope names |
-| Read a data product's rows | no | yes, shaped by its linked access principal's policies |
+| Read a data product's rows (`client.products.read`) | no — the consume path authenticates machines, and a person reads a product in the app instead | yes, shaped by its linked access principal's policies |
 | Addressing things | by id **or** by name | by **id** — resolving a name means listing |
 | Ends | when the session expires | when an administrator revokes the account |
 
@@ -64,6 +64,8 @@ Environment you are working in:
 client = Client("https://app.example.com", token, environment="env_prod_eu")
 client.data_models.publish("Customer")
 client.sources.ingest("crm", records)          # needs the `ingest:run` permission
+for record in client.golden.list("Customer"):  # the resolved single view
+    ...
 ```
 
 Where it comes from depends on how your install authenticates people — your identity provider,
