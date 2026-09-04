@@ -1,12 +1,22 @@
 """The client shell: connection, auth, per-request headers, error mapping. Every call carries the
-bearer token and the Environment header; errors surface the server's error envelope verbatim —
-code, message and `details`, which is where a governed write's refusal explains itself."""
+bearer token, and an Environment header when the connection names one; errors surface the
+server's error envelope verbatim — code, message and `details`, which is where a governed write's
+refusal explains itself.
+
+Two token personas connect here (see the README). A **session** token belongs to a signed-in
+person and must name its Environment. A **service-account** token belongs to a machine: it is
+pinned to one Environment by the account itself, so it names none, and it reaches only what its
+account holds — ingest into the sources its `ingest` scope lists, and the published products its
+linked access principal may consume. Anything else on that connection is a session route, and the
+few places where the difference is invisible until the server answers 401 are refused here
+instead, with the remedy in the message.
+"""
 
 from __future__ import annotations
 
 import contextlib
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -23,6 +33,8 @@ from masterly._precondition import coerce as _coerce_precondition
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _IF_MATCH = "If-Match"
+
+Persona = Literal["session", "service-account"]
 
 
 class ApiError(Exception):
@@ -63,36 +75,93 @@ class Client:
 
     Args:
         base_url: The install's URL, e.g. ``https://app.example.com``.
-        token: A session or service-account bearer token.
-        environment: The Environment id, e.g. ``env_prod_eu``.
+        token: A session bearer token. For a machine credential use
+            :meth:`for_service_account` instead — it carries what that persona can and
+            cannot do.
+        environment: The Environment id, e.g. ``env_prod_eu``. A session token must name
+            one; leaving it out sends no ``X-Masterly-Environment`` header, which only the
+            Organization-scoped endpoints (``/v1/environments``) and the service-account
+            routes accept.
     """
 
     def __init__(
         self,
         base_url: str,
         token: str,
-        environment: str,
+        environment: str | None = None,
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         from masterly import __version__
 
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "User-Agent": f"masterly-python/{__version__}",
+        }
+        if environment:
+            headers["X-Masterly-Environment"] = environment
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-Masterly-Environment": environment,
-                "User-Agent": f"masterly-python/{__version__}",
-            },
+            headers=headers,
             timeout=_TIMEOUT,
             transport=transport,
         )
+        #: Which token persona this connection holds — see :meth:`for_service_account`.
+        self.persona: Persona = "session"
+        #: The Environment named on the connection, or None (a service account is pinned to
+        #: its own, and an Organization-scoped call names none).
+        self.environment: str | None = environment or None
         self.products = ProductsApi(self)
         self.sources = SourcesApi(self)
         self.golden = GoldenApi(self)
         self.workspaces = WorkspacesApi(self)
         self.domains = DomainsApi(self)
         self.data_models = DataModelsApi(self)
+
+    @classmethod
+    def for_service_account(
+        cls,
+        base_url: str,
+        token: str,
+        *,
+        environment: str | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> Client:
+        """Connect as a **service account** — the machine persona, for a scheduled load.
+
+        A service account is created by an administrator against one Environment, with an
+        ``ingest`` scope naming exactly the Sources it may push into (and, through its linked
+        access principal, the published products it may consume). It is pinned to that
+        Environment, so this connection names none: the account decides where its records
+        land, and a token that leaks cannot be pointed somewhere else.
+
+        ``token`` is the OAuth2 client-credentials access token your identity provider issues
+        for the account's client (on an install running the dev identity binding, the token the
+        create call handed back). What it opens::
+
+            client = Client.for_service_account("https://app.example.com", token)
+            client.sources.ingest("src_7f3c9a", records)   # a source its `ingest` scope names
+            client.products.read("dp_a1b2c3")              # a product its principal may consume
+
+        Sources and products are addressed **by id**: naming one means listing the
+        Environment, which is a session route. A source the scope does not name is refused
+        with ``ApiError`` code ``SERVICE_ACCOUNT_SCOPE_DENIED`` — scopes are fixed when the
+        account is created, so a new account is the remedy, not a grant. Everything else on
+        this connection (configuration, golden records, stewardship) answers 401: those are
+        session routes, and this token is not a session.
+
+        Args:
+            base_url: The install's URL.
+            token: The service account's access token.
+            environment: Optional assertion. Leave it out and the account's own Environment is
+                used; pass one and the server refuses the call with
+                ``SERVICE_ACCOUNT_SCOPE_DENIED`` if the account is pinned elsewhere — useful
+                when a job must not silently load a different Environment than intended.
+            transport: An httpx transport, for tests.
+        """
+        client = cls(base_url, token, environment, transport=transport)
+        client.persona = "service-account"
+        return client
 
     def close(self) -> None:
         self._http.close()
@@ -140,6 +209,15 @@ class Client:
         )
 
     # --- internal ---------------------------------------------------------------------
+
+    def _require_session(self, what: str, remedy: str) -> None:
+        """Refuse a session-only call on a machine connection here, where the message can say
+        why, rather than letting it come back as an unexplained 401 from a route that never
+        saw a session."""
+        if self.persona == "service-account":
+            raise PermissionError(
+                f"{what} needs a session token — this connection is a service account. {remedy}"
+            )
 
     def _request(
         self,

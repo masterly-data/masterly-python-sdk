@@ -359,3 +359,107 @@ def test_two_preconditions_on_one_write_are_refused() -> None:
 
     with pytest.raises(ValueError, match="once"):
         _client(handler).request("PUT", "/v1/x", json={}, headers={"if-match": '"7"'}, if_match=8)
+
+
+# --- the two token personas --------------------------------------------------------------
+
+
+def _service_account(handler: Any, environment: str | None = None) -> Client:
+    return Client.for_service_account(
+        "https://masterly.test",
+        token="m2m:dev:svc_example",  # obviously fake: the dev binding's shape
+        environment=environment,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def test_a_service_account_connection_names_no_environment() -> None:
+    """The account is pinned to its Environment, so the header is not sent — and a job that
+    ships its token somewhere else cannot point it at another Environment."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(202, json={"job_id": "job_1"})
+
+    client = _service_account(handler)
+    report = client.sources.ingest("src_1", [{"key": "k1"}])
+
+    assert client.persona == "service-account"
+    assert client.environment is None
+    assert report.records == 1
+    assert seen[-1].url.path == "/v1/ingest"
+    assert "x-masterly-environment" not in seen[-1].headers
+    assert seen[-1].headers["authorization"] == "Bearer m2m:dev:svc_example"
+
+
+def test_a_service_account_may_assert_the_environment_it_expects() -> None:
+    """Passing one is an assertion, not a choice: the server refuses a mismatch, which is how
+    a job says out loud which Environment it believes it is loading."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(202, json={"job_id": "job_1"})
+
+    _service_account(handler, environment="env_prod_eu").sources.ingest("src_1", [{"key": "k"}])
+    assert seen[-1].headers["x-masterly-environment"] == "env_prod_eu"
+
+
+def test_a_service_account_addresses_sources_and_products_by_id() -> None:
+    """Resolving a name means listing, which is a session route. Refused here, with the
+    remedy, rather than as an unexplained 401 from a route that never saw a session."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("the request must not be sent")
+
+    client = _service_account(handler)
+    with pytest.raises(PermissionError, match=r"source id"):
+        client.sources.ingest("crm", [{"key": "k"}])
+    with pytest.raises(PermissionError, match=r"`ingest` scope"):
+        client.sources.list()
+    with pytest.raises(PermissionError, match=r"product id"):
+        client.products.read("Customer 360")
+    with pytest.raises(PermissionError, match=r"dp_"):
+        client.products.list()
+
+
+def test_a_source_outside_the_scope_is_refused_by_the_server() -> None:
+    """The scope is fixed when the account is created, so this is not a grant away — the
+    error names the source it would not take."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            403,
+            json={
+                "error": {
+                    "code": "SERVICE_ACCOUNT_SCOPE_DENIED",
+                    "message": "This service account's `ingest` scope does not cover this source",
+                    "details": {"scope": "ingest", "source_id": "src_other"},
+                }
+            },
+        )
+
+    with pytest.raises(ApiError) as raised:
+        _service_account(handler).sources.ingest("src_other", [{"key": "k"}])
+    assert raised.value.code == "SERVICE_ACCOUNT_SCOPE_DENIED"
+    assert raised.value.status_code == 403
+    assert raised.value.details["source_id"] == "src_other"
+
+
+def test_a_session_connection_may_name_no_environment() -> None:
+    """The Organization-scoped endpoints are answered before an Environment is chosen."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"items": []})
+
+    client = Client(
+        "https://masterly.test", token="tok", transport=httpx.MockTransport(handler)
+    )
+    client.request("GET", "/v1/environments")
+
+    assert client.persona == "session"
+    assert client.environment is None
+    assert "x-masterly-environment" not in seen[-1].headers

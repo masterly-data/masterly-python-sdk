@@ -31,10 +31,21 @@ upserts by source key, so running twice never doubles the data.
         --token "$MASTERLY_TOKEN" --environment env_prod_eu \
         --model "Customer" --source crm --records 200
 
+    # top up an Environment as a machine: a service account, no session anywhere
+    uv run examples/demo_data.py --base-url https://app.example.com \
+        --service-account-token "$MASTERLY_SERVICE_ACCOUNT_TOKEN" \
+        --source-id crm=src_7f3c9a --customers 300
+
 Everything it does rides the SDK: `client.workspaces`, `client.domains`,
 `client.data_models` and `client.sources` for the configuration, `client.sources.ingest`
 for the delivery. The only raw calls left are the two that come before a connection
 exists — minting a token and asking which Environments you may use.
+
+Both token personas run it. With a session token it does all of the above. With a
+`--service-account-token` it does the one thing a machine principal is allowed to do —
+deliver records into the Sources that account's `ingest` scope names — which is why those
+Sources are named by id: a service account cannot list an Environment, cannot build
+configuration, and cannot read the counters afterwards.
 """
 
 from __future__ import annotations
@@ -1305,6 +1316,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     connection.add_argument("--dev-login", default=os.environ.get("MASTERLY_DEV_LOGIN"),
                             metavar="EMAIL",
                             help="mint a token by e-mail — installs on the dev identity binding")
+    connection.add_argument("--service-account-token",
+                            default=os.environ.get("MASTERLY_SERVICE_ACCOUNT_TOKEN"),
+                            metavar="TOKEN",
+                            help="run as a machine: a service account's access token. It is "
+                                 "pinned to its Environment and may only deliver into the "
+                                 "Sources its `ingest` scope names, so pass those with "
+                                 "--source-id (env: MASTERLY_SERVICE_ACCOUNT_TOKEN)")
     connection.add_argument("--organization", help="Organization to scope the session to")
     connection.add_argument("--environment", default=os.environ.get("MASTERLY_ENVIRONMENT"),
                             help="target Environment id; inferred when you have exactly one")
@@ -1330,6 +1348,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                           help="deliver to this existing Source (required with --model)")
     existing.add_argument("--records", type=int, default=200,
                           help="records to generate in --model mode")
+    existing.add_argument("--source-id", action="append", default=[], metavar="NAME=ID",
+                          help="deliver the built-in Source NAME to this Source id, instead of "
+                               "looking the name up. Repeatable; required with "
+                               "--service-account-token, which cannot list an Environment")
 
     output = parser.add_argument_group("placement and output")
     output.add_argument("--workspace", default="Demo", help="Workspace to bootstrap into")
@@ -1342,6 +1364,72 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="poll each source until the pipeline stops moving, then report")
     output.add_argument("--wait-timeout", type=int, default=120, metavar="SECONDS")
     return parser.parse_args(argv)
+
+
+def parse_source_ids(pairs: list[str]) -> dict[str, str]:
+    """`NAME=src_…` per built-in Source, for a run that is handed ids instead of looking
+    names up. A service account is always handed them: resolving a name means listing the
+    Environment, and listing is a session's privilege, not a scope's."""
+    known = {source.name for spec in MODEL_SPECS.values() for source in spec.sources}
+    mapping: dict[str, str] = {}
+    for pair in pairs:
+        name, _, source_id = pair.partition("=")
+        if not name or not source_id:
+            raise SystemExit(f"--source-id takes NAME=src_… (got '{pair}')")
+        if name not in known:
+            raise SystemExit(
+                f"'{name}' is not one of the built-in Sources: {', '.join(sorted(known))}"
+            )
+        if not source_id.startswith("src_"):
+            raise SystemExit(
+                f"--source-id {name}= wants the Source's id (src_…), not '{source_id}'"
+            )
+        mapping[name] = source_id
+    return mapping
+
+
+def refuse_session_only_work(args: argparse.Namespace, source_ids: dict[str, str]) -> None:
+    """What a service-account token cannot do, said before the run starts rather than as a
+    401 halfway through it."""
+    if args.token or args.dev_login:
+        raise SystemExit(
+            "pass one credential: --service-account-token, or --token/--dev-login — not both"
+        )
+    if args.model:
+        raise SystemExit(
+            "--model reads a Data Model's definition, which needs a session token. "
+            "Generate for the built-in models instead, or run this with --token."
+        )
+    if args.wait:
+        raise SystemExit(
+            "--wait polls each Source's counters and counts golden entities, which needs a "
+            "session token. Drop --wait, or run this with --token."
+        )
+    if not source_ids:
+        known = sorted({source.name for spec in MODEL_SPECS.values() for source in spec.sources})
+        raise SystemExit(
+            "a service account cannot list an Environment, so name the Sources it may deliver "
+            "into: --source-id NAME=src_… (built-in Sources: " + ", ".join(known) + ")"
+        )
+
+
+def connect(args: argparse.Namespace) -> Client:
+    """The connection, in whichever persona the credential is.
+
+    A service account is pinned to one Environment, so there is nothing to resolve: passing
+    `--environment` alongside it asserts which Environment the run believes it is loading, and
+    the server refuses the delivery rather than loading another one.
+    """
+    if args.service_account_token:
+        asserted = f", asserting {args.environment}" if args.environment else ""
+        print(f"connected to {args.base_url} as a service account{asserted}")
+        return Client.for_service_account(
+            args.base_url, args.service_account_token, environment=args.environment
+        )
+    token = args.token or login(args.base_url, args.dev_login, args.organization)
+    environment = resolve_environment(args.base_url, token, args.environment)
+    print(f"connected to {args.base_url} — Environment {environment}")
+    return Client(base_url=args.base_url, token=token, environment=environment)
 
 
 def generate_builtin(args: argparse.Namespace, rng: random.Random) -> list[Batch]:
@@ -1420,20 +1508,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.base_url:
         raise SystemExit("pass --base-url (or set MASTERLY_BASE_URL), or use --dry-run")
-    if not args.token and not args.dev_login:
-        raise SystemExit("pass --token (or set MASTERLY_TOKEN), or --dev-login EMAIL")
-    token = args.token or login(args.base_url, args.dev_login, args.organization)
-    environment = resolve_environment(args.base_url, token, args.environment)
-    print(f"connected to {args.base_url} — Environment {environment}")
+    source_ids = parse_source_ids(args.source_id)
+    machine = bool(args.service_account_token)
+    if machine:
+        refuse_session_only_work(args, source_ids)
+    elif not args.token and not args.dev_login:
+        raise SystemExit(
+            "pass --token (or set MASTERLY_TOKEN), --dev-login EMAIL, or "
+            "--service-account-token to run as a machine"
+        )
 
     deliveries: list[tuple[str, str, list[dict[str, Any]]]] = []  # (source_id, label, records)
     batches: list[Batch] = []
 
-    with Client(base_url=args.base_url, token=token, environment=environment) as client:
+    with connect(args) as client:
         if args.model:
             deliveries.append(plan_adaptive(client, args, rng))
         else:
-            if not args.no_bootstrap:
+            if machine:
+                print("service account: skipping bootstrap — configuration is a session's work")
+            elif not args.no_bootstrap:
                 print("bootstrapping configuration:")
                 workspace_id = ensure_workspace(client, args.workspace)
                 domain_id = ensure_domain(client, workspace_id, args.domain)
@@ -1445,8 +1539,23 @@ def main(argv: list[str] | None = None) -> int:
                         ensure_source(client, source_spec, model_spec.name)
 
             batches = generate_builtin(args, rng)
+            if machine:
+                # Generate first, then keep the named Sources: the seeded population is the
+                # same records a full run would have delivered to them.
+                skipped = sorted({b.spec.name for b in batches} - set(source_ids))
+                batches = [b for b in batches if b.spec.name in source_ids]
+                if not batches:
+                    raise SystemExit(
+                        "--source-id names no Source this run generates for "
+                        f"(--models {' '.join(args.models)} generates: {', '.join(skipped)})"
+                    )
+                if skipped:
+                    print(f"not named by --source-id, skipping: {', '.join(skipped)}")
             print_plan(batches)
             for batch in batches:
+                if batch.spec.name in source_ids:
+                    deliveries.append((source_ids[batch.spec.name], batch.spec.name, batch.records))
+                    continue
                 source = require_source(client, batch.spec.name)
                 deliveries.append((str(source["source_id"]), batch.spec.name, batch.records))
 
