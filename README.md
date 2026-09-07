@@ -105,8 +105,14 @@ the job should *assert* which Environment it believes it is loading — the serv
 call rather than loading the other one.
 
 **How to get one.** Someone who can manage service accounts in that Environment (the Integrator
-role and above) creates it. An account with an `ingest` scope is created over the API, because
-the scope names ids:
+role and above) creates it in the app, under **Access management → Service accounts → New service
+account**: name it, pick the **access principal** it consumes as, and, if it will deliver records,
+tick **Ingest** and name exactly the Sources it may push into. The credential is shown once, on
+creation, together with the Source ids the scope names and the `POST /v1/ingest` endpoint to send
+them to. The same screen lists the Environment's accounts and revokes them
+(`DELETE /v1/service-accounts/{service_account_id}`).
+
+The equivalent for scripted setup is `POST /v1/service-accounts`:
 
 ```python
 credential = admin.request("POST", "/v1/service-accounts", json={
@@ -117,9 +123,7 @@ credential = admin.request("POST", "/v1/service-accounts", json={
 credential["token"]        # shown once — put it straight into your secret manager
 ```
 
-Leave `scopes` out and the account is consume-only. The app's **Access → Service accounts**
-screen lists the Environment's accounts and revokes them
-(`DELETE /v1/service-accounts/{service_account_id}`).
+Leave `scopes` out and the account is consume-only.
 
 What `credential["token"]` holds depends on the install. On the dev identity binding it *is* the
 token to present (it looks like `m2m:dev:svc_example`). With a real identity provider the
