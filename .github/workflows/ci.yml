@@ -11,6 +11,13 @@ on:
   push:
     branches: [main]
 
+# A re-push supersedes the run before it, so cancel the superseded PR run rather than pay
+# for a result nobody will read. Guarded to pull_request: a push to main — a deploy on some
+# repos, a tag build on others — must never be cancelled by whatever lands next. MAS-174.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
