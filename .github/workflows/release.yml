@@ -12,7 +12,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false — actions/checkout otherwise leaves the job's
+      # GITHUB_TOKEN in .git/config for the rest of the run, where any later step or
+      # third-party action can read it. Nothing in this repo pushes from CI, so the
+      # token has no job to do after the checkout. See masterly-framework
+      # docs/conventions/github-repo-settings.md, "Checkout credentials".
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - name: Refuse a tag that does not match the package version
         run: |
           version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
