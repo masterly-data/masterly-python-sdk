@@ -21,7 +21,7 @@ from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import IngestReport
 from masterly._precondition import Conflict, Precondition
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ApiError",

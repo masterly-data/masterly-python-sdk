@@ -46,6 +46,42 @@ def test_product_read_pages_through_cursors() -> None:
     assert len(calls) == 2
 
 
+def test_a_filtered_product_read_travels_in_the_body_not_the_url() -> None:
+    """A filter value is master data, so `filters=` turns the read into `POST …:read` with the
+    question in the body — nothing of it in the query string — and pages through the same
+    cursor. `fields` rides along in the body when both are given."""
+    calls: list[tuple[str, str, dict[str, Any], Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.method, request.url.path, dict(request.url.params), body))
+        if body.get("cursor") is None:
+            return httpx.Response(200, json={"items": [{"name": "Acme"}], "next_cursor": "c2"})
+        return httpx.Response(200, json={"items": [{"name": "Initech"}], "next_cursor": None})
+
+    filters = [{"attribute": "region", "op": "equals", "values": ["EU"]}]
+    rows = list(_client(handler).products.read("dp_1", filters=filters, fields=["name", "region"]))
+    assert [r["name"] for r in rows] == ["Acme", "Initech"]
+    assert [c[:2] for c in calls] == [("POST", "/v1/consume/products/dp_1:read")] * 2
+    assert all(c[2] == {} for c in calls)  # the URL carries nothing but the product id
+    assert calls[0][3] == {"filters": filters, "fields": ["name", "region"], "limit": 200}
+    assert calls[1][3]["cursor"] == "c2" and calls[1][3]["filters"] == filters
+
+
+def test_a_fields_only_read_stays_a_get_with_the_names_in_the_query() -> None:
+    """Field names are not values: a `fields`-only read is the plain GET with `fields=a,b`,
+    which also keeps it working against an install that predates the `:read` endpoint."""
+    seen: list[tuple[str, str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, dict(request.url.params)))
+        return httpx.Response(200, json={"items": [{"name": "Acme"}], "next_cursor": None})
+
+    rows = list(_client(handler).products.read("dp_1", fields=["name", "region"]))
+    assert rows == [{"name": "Acme"}]
+    assert seen == [("GET", "/v1/consume/products/dp_1", {"fields": "name,region", "limit": "200"})]
+
+
 def test_change_feed_exposes_resumable_cursor() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/data-products":
