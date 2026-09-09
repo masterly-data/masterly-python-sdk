@@ -30,6 +30,14 @@ for row in job.products.read("dp_a1b2c3"):
 # Or straight into a DataFrame
 df = job.products.read("dp_a1b2c3").to_pandas()
 
+# A slice, shaped on the server within the product's contract: row filters (ANDed, and
+# always inside the account's access policies) and the fields to return
+eu = job.products.read(
+    "dp_a1b2c3",
+    filters=[{"attribute": "country", "op": "equals", "values": ["SE"]}],
+    fields=["global_id", "name", "tier"],
+)
+
 # Follow the change feed with a resumable cursor
 feed = job.products.changes("dp_a1b2c3", cursor=saved_cursor)
 for change in feed:

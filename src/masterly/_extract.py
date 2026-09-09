@@ -7,7 +7,7 @@ and never sees a page. ``to_pandas()`` is available wherever pandas is installed
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pandas stays optional at runtime
@@ -128,16 +128,52 @@ class ProductsApi:
         product_id: str = matches[0]["product_id"]
         return product_id
 
-    def read(self, product: str, **params: Any) -> RowPages:
+    def read(
+        self,
+        product: str,
+        *,
+        filters: Sequence[dict[str, Any]] | None = None,
+        fields: Sequence[str] | None = None,
+        **params: Any,
+    ) -> RowPages:
         """Every row of a published product, cursor-paged behind the iterator.
 
         The consume path authenticates a **service account** and no one else, so this is a
         :meth:`~masterly.Client.for_service_account` connection's read: rows arrive shaped by
         the access policies of the principal the account is linked to, and every read is
         metered and audited against it.
+
+        Shape the read within the product's contract — both arguments take the contract's
+        **output** field names, the ones ``GET /v1/data-products/{id}/contract`` lists:
+
+        - ``filters`` — row filters, each ``{"attribute": ..., "op": ..., "values": [...]}``
+          with ``op`` one of ``"equals"`` (one value), ``"in"`` (any of the values) or
+          ``"contains"`` (case-insensitive substring, one value). Filters are ANDed together
+          and with the consumer's row policies, on the server, so a filtered read pages only
+          the matching rows and can never widen what the policies allow.
+        - ``fields`` — the output fields to return; the others are absent from each row. A
+          field the consumer's policy hides is simply left out.
+
+        A name outside the contract raises :class:`~masterly.ApiError` with code
+        ``OUT_OF_CONTRACT``; a masked or composed (joined, derived, hierarchy) field can be
+        selected but not filtered on (``FIELD_NOT_FILTERABLE``).
+
+        A filter value is master data, so a filtered read travels as ``POST …:read`` with the
+        question in the body rather than in a query string, where it would reach access logs
+        and every proxy between you and the Environment. Field names are not values, so a
+        ``fields``-only read stays a ``GET``, which also keeps it working against an install
+        that predates the ``:read`` endpoint.
         """
         product_id = self._resolve(product)
-        return RowPages(self._client, f"/v1/consume/products/{product_id}", params)
+        path = f"/v1/consume/products/{product_id}"
+        if filters:
+            body: dict[str, Any] = {**params, "filters": filters}
+            if fields:
+                body["fields"] = fields
+            return RowPages(self._client, f"{path}:read", body=body)
+        if fields:
+            params = {**params, "fields": ",".join(fields)}
+        return RowPages(self._client, path, params)
 
     def changes(self, product: str, cursor: str | None = None) -> ChangeFeed:
         """Changes since ``cursor`` (or from the beginning). Persist ``feed.cursor``."""
@@ -154,7 +190,7 @@ class GoldenApi:
         model: str,
         *,
         q: str | None = None,
-        filters: list[str] | None = None,
+        filters: Sequence[str] | None = None,
     ) -> RowPages:
         """Golden records of a model — the resolved single view, before any product shaping.
 
