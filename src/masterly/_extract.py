@@ -7,7 +7,7 @@ and never sees a page. ``to_pandas()`` is available wherever pandas is installed
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pandas stays optional at runtime
@@ -132,8 +132,8 @@ class ProductsApi:
         self,
         product: str,
         *,
-        filters: list[dict[str, Any]] | None = None,
-        fields: list[str] | None = None,
+        filters: Sequence[dict[str, Any]] | None = None,
+        fields: Sequence[str] | None = None,
         **params: Any,
     ) -> RowPages:
         """Every row of a published product, cursor-paged behind the iterator.
@@ -190,7 +190,7 @@ class GoldenApi:
         model: str,
         *,
         q: str | None = None,
-        filters: list[str] | None = None,
+        filters: Sequence[str] | None = None,
     ) -> RowPages:
         """Golden records of a model — the resolved single view, before any product shaping.
 
