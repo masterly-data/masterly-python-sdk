@@ -52,6 +52,11 @@ ignore = ["S101"]
 # The demo data generator seeds a pseudo-random generator on purpose — reproducible fake
 # data is the whole point, and none of it is a secret.
 "examples/*" = ["S311"]
+# The release-record check shells out to git. Every argument is a literal subcommand or a
+# value read out of this repository's own tracked files, the list form never goes near a
+# shell, and resolving git on PATH is the point — a hard-coded path would break the very
+# CI runners the check exists to run on.
+"scripts/*" = ["S603", "S607"]
 
 [tool.mypy]
 strict = true

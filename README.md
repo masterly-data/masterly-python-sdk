@@ -256,6 +256,12 @@ without a typed method is reached through `client.request(...)`, which takes the
 customers, suppliers and products as three source systems would actually deliver them,
 duplicates and defects included — and ingests it into an Environment.
 
+## Releases
+
+Versions are published to PyPI from a `vX.Y.Z` tag in this repository. How a release is
+cut — and which commit each published version was built from — is
+[RELEASING.md](RELEASING.md).
+
 ## License
 
 Copyright 2026 Masterly. Apache-2.0 — see [LICENSE](LICENSE).

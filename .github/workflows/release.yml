@@ -1,7 +1,13 @@
 # Publishes the package to PyPI via trusted publishing (OIDC) — no API tokens anywhere.
 # Trigger: pushing a tag `vX.Y.Z`. PyPI trusts this exact repo + workflow file + `pypi`
-# environment (registered as a publisher on pypi.org), and versions on PyPI are immutable,
-# so the build job refuses a tag that does not match pyproject's version.
+# environment (registered as a publisher on pypi.org).
+#
+# The tag is the release record: it is the only thing that says which commit an installable
+# artifact was built from, and PyPI versions are immutable, so a wrong or missing one cannot be
+# corrected by re-publishing. The build job therefore refuses, before it builds anything, a tag
+# that would produce a release nobody can reproduce — one that does not match pyproject's
+# version, one whose commit is not on the default branch, and one claiming a version already
+# spent on PyPI. See RELEASING.md.
 name: release
 
 on:
@@ -11,22 +17,59 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       # persist-credentials: false — actions/checkout otherwise leaves the job's
       # GITHUB_TOKEN in .git/config for the rest of the run, where any later step or
       # third-party action can read it. Nothing in this repo pushes from CI, so the
       # token has no job to do after the checkout. See masterly-framework
       # docs/conventions/github-repo-settings.md, "Checkout credentials".
+      #
+      # fetch-depth: 0 — the release-record check reasons about history and refuses to run in
+      # a shallow clone, where "that commit is not in our history" is true of everything and
+      # proves nothing.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Refuse a tag that does not match the package version
+          fetch-depth: 0
+      # A tag on a side branch publishes an artifact whose source is not in the history anyone
+      # reads — the same defect as no tag at all, wearing a tag. The default branch is asked
+      # for rather than assumed: a repository that renames it must not silently stop being
+      # checked, so an empty or unexpected answer fails the release.
+      - name: Refuse a tag whose commit is not on the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
-          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${version}" >&2
+          set -euo pipefail
+          default_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')
+          if [ -z "${default_branch}" ]; then
+            echo "could not determine the default branch — refusing to publish blind" >&2
             exit 1
           fi
+          relation=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${default_branch}...${GITHUB_SHA}" \
+            --jq '.status')
+          case "${relation}" in
+            identical|behind)
+              echo "${GITHUB_REF_NAME} (${GITHUB_SHA}) is on ${default_branch}" ;;
+            ahead|diverged)
+              echo "tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not on" \
+                   "${default_branch} (${relation}). Merge it first, then tag the merged" \
+                   "commit — a published artifact has to be reachable from the history" \
+                   "customers read. See RELEASING.md." >&2
+              exit 1 ;;
+            *)
+              echo "unexpected comparison result '${relation}' for ${GITHUB_SHA} against" \
+                   "${default_branch}; refusing to publish on an answer this check does not" \
+                   "understand." >&2
+              exit 1 ;;
+          esac
+      # Version match, plus: the tag must not claim one of the versions RELEASING.md records as
+      # published before this repository existed. Those numbers are spent on PyPI, and a tag
+      # here claiming one would be a provenance claim a customer can read, and wrong.
+      - name: Refuse a tag the release record will not stand behind
+        run: python3 scripts/check_release_record.py --tag "${GITHUB_REF_NAME}"
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10, pinned by digest
       - run: uv build
       - uses: actions/upload-artifact@v7

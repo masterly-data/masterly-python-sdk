@@ -45,3 +45,32 @@ jobs:
       # part of its contract.
       - run: uv run mypy src
       - run: uv run pytest -q
+
+  # Every version on PyPI should be a tag here, and two are not: 0.1.1 and 0.2.0 were published
+  # from the private repository this one replaced, and the archive-and-recreate did not carry
+  # their tags across (MAS-503). RELEASING.md records what they were built from; this job keeps
+  # that record honest, and stops the package version from being set to one of those spent
+  # numbers. Its own job because it is standard-library only — no uv, no matrix, no network.
+  release-record:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # persist-credentials: false — actions/checkout otherwise leaves the job's
+      # GITHUB_TOKEN in .git/config for the rest of the run, where any later step or
+      # third-party action can read it. Nothing in this repo pushes from CI, so the
+      # token has no job to do after the checkout. See masterly-framework
+      # docs/conventions/github-repo-settings.md, "Checkout credentials".
+      #
+      # fetch-depth: 0 — the check asks whether a commit is in this repository's history, and
+      # in a shallow clone the answer is "no" for everything. It refuses to run shallow rather
+      # than answer vacuously, so the full history is not optional here.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      # The detector before the thing it detects: synthetic records prove the check still
+      # rejects a missing, malformed or stale one, so a check that has quietly stopped
+      # checking fails here rather than passing the repository for the wrong reason.
+      - run: python3 scripts/check_release_record.py --selftest
+      - run: python3 scripts/check_release_record.py
