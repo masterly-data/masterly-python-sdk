@@ -24,7 +24,16 @@ dependencies = ["httpx>=0.27"]
 Homepage = "https://masterlydata.com"
 Documentation = "https://masterlydata.com/docs/reference/python-sdk/"
 Repository = "https://github.com/masterly-data/masterly-python-sdk"
-Changelog = "https://github.com/masterly-data/masterly-python-sdk/releases"
+# PyPI renders these in the project sidebar, so each one is a link a customer follows. The
+# Changelog used to point at this repository's GitHub Releases, which has no releases in it
+# and is not going to: tags, not Releases, are the record here (see RELEASING.md), and
+# adopting release-please for the client would pre-empt an open decision about how its
+# version is set. The tag list is no better today — the two published versions were tagged in
+# the private repository this one replaced. So the link goes where the change history
+# actually is: the docs changelog, which every docs page footer already calls "changelog" and
+# which carries the client's own entries. Deliberately not the same URL as Documentation
+# above — a sidebar with the same destination twice answers neither question.
+Changelog = "https://masterlydata.com/docs/whats-new/"
 
 [project.optional-dependencies]
 pandas = ["pandas>=2.0"]
