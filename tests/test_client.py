@@ -103,6 +103,33 @@ def test_change_feed_exposes_resumable_cursor() -> None:
     assert feed.cursor == "end"  # persist this for the next run
 
 
+def test_product_listing_follows_its_cursor_and_a_name_on_page_two_resolves() -> None:
+    """The fifty-first product must not vanish from `list()`, nor from a name lookup, because
+    the first page of `/v1/data-products` ended (MAS-648)."""
+    listing_params: list[dict[str, Any]] = []
+    consumed: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if request.url.path == "/v1/data-products":
+            listing_params.append(params)
+            if params.get("cursor") == "p2":
+                items = [{"product_id": "dp_2", "name": "Supplier"}]
+                return httpx.Response(200, json={"items": items, "next_cursor": None})
+            items = [{"product_id": "dp_1", "name": "Customer 360"}]
+            return httpx.Response(200, json={"items": items, "next_cursor": "p2"})
+        consumed.append(request.url.path)
+        return httpx.Response(200, json={"items": [], "next_cursor": None})
+
+    client = _client(handler)
+    assert [p["name"] for p in client.products.list()] == ["Customer 360", "Supplier"]
+    assert listing_params == [{"limit": "200"}, {"limit": "200", "cursor": "p2"}]
+
+    list(client.products.read("Supplier"))
+    list(client.products.changes("Supplier"))
+    assert consumed == ["/v1/consume/products/dp_2", "/v1/consume/products/dp_2/changes"]
+
+
 def test_ingest_chunks_batches() -> None:
     bodies: list[dict[str, Any]] = []
 

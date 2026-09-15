@@ -2,9 +2,9 @@
 
 Data rows page lazily through :class:`~masterly.RowPages`, because a product read is
 unbounded and a notebook wants to start consuming before the last page arrives. A listing of
-workspaces, domains, models or sources is bounded by what a human configured, so it is
-gathered eagerly into a list: the caller almost always wants to search it by name, and a
-generator that has to be fully drained to answer "is it there?" only adds a step.
+workspaces, domains, models, sources or data products is bounded by what a human configured,
+so it is gathered eagerly into a list: the caller almost always wants to search it by name,
+and a generator that has to be fully drained to answer "is it there?" only adds a step.
 
 The limit is the API's maximum (200). A listing that fits in one page therefore costs one
 request, which is the common case; the loop exists so that the hundredth source does not

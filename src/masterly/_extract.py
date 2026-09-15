@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
+from masterly._paging import all_items
+
 if TYPE_CHECKING:  # pandas stays optional at runtime
     import pandas
 
@@ -109,9 +111,7 @@ class ProductsApi:
             "listing data products",
             "Keep the product ids (`dp_…`) the account consumes in the job's configuration.",
         )
-        page = self._client._request("GET", "/v1/data-products")
-        items: list[dict[str, Any]] = page.get("items", [])
-        return items
+        return all_items(self._client, "/v1/data-products")
 
     def _resolve(self, product: str) -> str:
         """Accept a product id (``dp_…``) or its exact name (a name costs a listing, which is a
