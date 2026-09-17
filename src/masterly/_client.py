@@ -33,6 +33,7 @@ from masterly._precondition import coerce as _coerce_precondition
 
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _IF_MATCH = "If-Match"
+_IF_NONE_MATCH = "If-None-Match"
 
 Persona = Literal["session", "service-account"]
 
@@ -181,6 +182,7 @@ class Client:
         json: Any | None = None,
         headers: Mapping[str, str] | None = None,
         if_match: Precondition | str | int | None = None,
+        if_none_match: bool = False,
     ) -> Any:
         """Call a ``/v1`` endpoint this client has no typed method for, on this connection.
 
@@ -201,11 +203,29 @@ class Client:
             client.request("PUT", "/v1/access-policies/pol_1", json=policy,
                            if_match=policy["version"])
 
+        ``if_none_match=True`` is the other precondition — the one a **create** states. Some
+        governed operations upsert (``POST /v1/records`` by business key, a configuration on
+        its first save), and an object nobody has authored has no ``version`` to quote. It
+        sends ``If-None-Match: *``, "only if it does not exist yet": the write lands when there
+        is nothing there, and is refused with 409 VERSION_CONFLICT when there is — read the
+        object, then replace it with ``if_match``. It is not a way to skip the read on an
+        object that exists; ``Precondition.unconditional()`` is that, and leaves an audit
+        trace. Create::
+
+            client.request("POST", "/v1/records", if_none_match=True,
+                           json={"model_name": "Customer", "values": record})
+
         A 409 raises :class:`~masterly.ApiError` whose ``conflict`` says what moved. Returns the
         decoded body, or None for a 204 or an empty one.
         """
         return self._request(
-            method, path, params=params, json=json, headers=headers, if_match=if_match
+            method,
+            path,
+            params=params,
+            json=json,
+            headers=headers,
+            if_match=if_match,
+            if_none_match=if_none_match,
         )
 
     # --- internal ---------------------------------------------------------------------
@@ -228,16 +248,28 @@ class Client:
         json: Any | None = None,
         headers: Mapping[str, str] | None = None,
         if_match: Precondition | str | int | None = None,
+        if_none_match: bool = False,
     ) -> Any:
         sent = dict(headers) if headers else {}
+        # Fail closed on two preconditions rather than picking one: which revision this write
+        # replaces — or that there is none — is not a thing to resolve by precedence. The server
+        # refuses both headers together as PRECONDITION_MALFORMED; refusing here keeps the
+        # mistake next to the line that made it, and costs no request.
+        stated = {name.lower() for name in sent} & {_IF_MATCH.lower(), _IF_NONE_MATCH.lower()}
+        if if_match is not None and if_none_match:
+            raise ValueError(
+                "a write states one precondition — if_match= (the revision it replaces) or "
+                "if_none_match=True (it must not exist yet), never both"
+            )
+        if (if_match is not None or if_none_match) and stated:
+            raise ValueError(
+                "pass the precondition once — either if_match= / if_none_match=, or an "
+                "If-Match / If-None-Match header"
+            )
         if if_match is not None:
-            # Fail closed on two preconditions rather than picking one: which revision this write
-            # replaces is not a thing to resolve by precedence.
-            if any(name.lower() == _IF_MATCH.lower() for name in sent):
-                raise ValueError(
-                    "pass the precondition once — either if_match= or an If-Match header"
-                )
             sent[_IF_MATCH] = _coerce_precondition(if_match).header_value
+        if if_none_match:
+            sent[_IF_NONE_MATCH] = "*"
         response = self._http.request(method, path, params=params, json=json, headers=sent or None)
         if response.status_code >= 400:
             code, message = "HTTP_ERROR", response.text[:500]
