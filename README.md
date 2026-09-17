@@ -187,6 +187,16 @@ except ApiError as error:
   if you kept the response header instead, `Precondition.unconditional()` for `If-Match: *`
   ("it must exist; I do not care which revision"), which is recorded in the audit trail as an
   unconditional write.
+- **A create has a precondition of its own.** Some governed operations upsert — `POST /v1/records`
+  by business key, a configuration on its first save — and an object nobody has authored has no
+  `version` to quote. `if_none_match=True` sends `If-None-Match: *` ("only if it does not exist
+  yet"): the write lands when there is nothing there, and is refused with `VERSION_CONFLICT`
+  when there is — read the object, then replace it with `if_match`.
+
+  ```python
+  client.request("POST", "/v1/records", if_none_match=True,
+                 json={"model_name": "Customer", "values": record})
+  ```
 - **A conflict names what moved, never what it moved to.** There is no "theirs" column in the
   refusal, by design: it would be a read you may not be entitled to, arriving by the error path.
   Re-read the object to compare — that runs the ordinary authorization and access-policy path.

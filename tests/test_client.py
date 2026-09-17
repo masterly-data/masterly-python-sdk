@@ -422,6 +422,57 @@ def test_two_preconditions_on_one_write_are_refused() -> None:
 
     with pytest.raises(ValueError, match="once"):
         _client(handler).request("PUT", "/v1/x", json={}, headers={"if-match": '"7"'}, if_match=8)
+    with pytest.raises(ValueError, match="once"):
+        _client(handler).request(
+            "POST", "/v1/x", json={}, headers={"If-None-Match": "*"}, if_none_match=True
+        )
+    with pytest.raises(ValueError, match="once"):
+        _client(handler).request(
+            "POST", "/v1/x", json={}, headers={"if-match": '"7"'}, if_none_match=True
+        )
+    with pytest.raises(ValueError, match="never both"):
+        _client(handler).request("POST", "/v1/x", json={}, if_match=7, if_none_match=True)
+
+
+def test_a_create_states_that_there_is_nothing_to_replace() -> None:
+    """ADR 0070, amendment 2026-09-09: `if_none_match=True` is `If-None-Match: *`, the
+    precondition a create can satisfy — an object nobody has authored has no `version` to
+    quote, and `If-Match: *` means "it must exist". Sent alone, as the one precondition."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"record_id": "rec_1"})
+
+    body = _client(handler).request(
+        "POST", "/v1/records", json={"model_name": "Customer"}, if_none_match=True
+    )
+    assert body == {"record_id": "rec_1"}
+    assert seen[-1].headers["if-none-match"] == "*"
+    assert "if-match" not in seen[-1].headers
+
+    # The default sends neither header — a create is stated, never assumed.
+    _client(handler).request("POST", "/v1/records", json={"model_name": "Customer"})
+    assert "if-none-match" not in seen[-1].headers
+
+
+def test_a_create_that_finds_the_object_is_a_conflict_with_no_base() -> None:
+    """A create colliding with an existing object is refused as VERSION_CONFLICT — the mergeable
+    class, so `conflict` is typed like any other. The base is None because a create names no
+    revision; `current_version` is what to read the object by, and then replace it under
+    `if_match`."""
+    exists = {**_CONFLICT, "object_type": "source-record", "changed_fields_complete": False}
+    del exists["base_version"]
+    with pytest.raises(ApiError) as excinfo:
+        _client(_refuses_with(409, "VERSION_CONFLICT", exists)).request(
+            "POST", "/v1/records", json={}, if_none_match=True
+        )
+    conflict = excinfo.value.conflict
+    assert conflict is not None
+    assert conflict.base_version is None
+    assert conflict.current_version == "8"
+    assert not conflict.removed
+    assert not conflict.may_auto_merge
 
 
 # --- the two token personas --------------------------------------------------------------
