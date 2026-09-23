@@ -1,0 +1,46 @@
+# zizmor policy -- the GitHub Actions hardening rules this org decided, written down for a gate.
+#
+# One source (MAS-172): the canonical copy of this file is masterly-framework
+# repo-templates/zizmor/zizmor.yml, next to the workflow that runs it. Every repo that has
+# workflows -- masterly-framework included -- holds a VERBATIM copy at .github/zizmor.yml plus
+# the workflow at .github/workflows/workflow-hardening.yml. Change both in masterly-framework and
+# re-copy; never edit a copy in place. The workflow's last step cmps masterly-framework's own
+# copies against these templates.
+#
+# What it encodes is masterly-framework docs/conventions/github-repo-settings.md. Every deviation
+# from zizmor's defaults below names the convention section it implements. Everything not named
+# here is zizmor's default for the "regular" persona: artipacked ("Checkout credentials",
+# MAS-171), excessive-permissions ("Token permissions", MAS-135), dangerous-triggers ("Workflow
+# triggers"), template-injection (MAS-154, MAS-185), cache-poisoning, and the rest of the audits
+# that work offline. The gate runs offline; the workflow says why.
+#
+# A suppression belongs in the workflow it suppresses, as `# zizmor: ignore[<audit>]` on the
+# finding's span with the card that owns it -- so the debt sits in the repo that carries it and
+# clears with that card, not with a re-copy of this file. This file carries the policy, and the
+# one exception that cannot be written inline.
+
+rules:
+  unpinned-uses:
+    config:
+      # "Action pinning": third-party actions are pinned by commit SHA, and actions/* (GitHub-owned)
+      # are left on major tags -- "a deliberate line, not an oversight". zizmor's default since
+      # v1.20 is hash-pin for everything, which would flag every actions/checkout@v7 in the org and
+      # reverse that decision by attrition. The decision lives in the convention; this only encodes
+      # it. The most specific pattern wins, so a stricter rule for one GitHub-owned action can be
+      # added above the namespace rule without touching the rest.
+      policies:
+        "actions/*": ref-pin
+        "*": hash-pin
+
+  dangerous-triggers:
+    ignore:
+      # masterly-framework only. The filename matches nothing in any other repo, which is what lets
+      # every copy stay byte-identical -- the same device as the link checker's framework-only
+      # constants. review-verdict.yml is governed (docs/operating-model/, ADR 0084) and uses
+      # pull_request_target on purpose: it never checks out or runs the pull request's tree, reads
+      # the pull request as data through the API only, and its header records why. That keeps it
+      # inside the rule "Workflow triggers" states -- a workflow that runs a pull request's own code
+      # uses pull_request -- but zizmor cannot see that from the trigger alone. Changing that file
+      # is an owner decision, and an inline ignore would be an edit to a governed path, so the
+      # exception lives here.
+      - review-verdict.yml
