@@ -65,7 +65,8 @@ what you can reach — and, for the machine one, *where*.
 
 ### A session token
 
-Yours, from signing in. It is scoped to one Organization, and you tell the client which
+Yours — the same session you hold when you are signed in to the app, issued to you again for
+use outside the browser. It is scoped to one Organization, and you tell the client which
 Environment you are working in:
 
 ```python
@@ -76,10 +77,25 @@ for record in client.golden.list("Customer"):  # the resolved single view
     ...
 ```
 
-Where it comes from depends on how your install authenticates people — your identity provider,
-through the app. An install running the **dev identity binding** (local development, and demo
-installs) mints one from an e-mail address instead, which is what `examples/demo_data.py`
-does behind `--dev-login`:
+Where it comes from: **issue it from the app you are signed in to.** `POST
+/v1/auth/sessions:issue`, called as your signed-in session with no body, answers with a new
+session token — once; no later call returns it again. The browser never holds your session
+token (the app keeps it on its own server), so the call is made from the app's page, which
+attaches your session for you: sign in, switch to the Organization you want the token for,
+open your browser's developer tools on any page of the app, and run in the console
+
+```js
+await (await fetch("/api/proxy/v1/auth/sessions:issue", { method: "POST" })).json()
+```
+
+then copy `session_token` from the answer into your secret store. The route is not in a
+published release yet; an install on an earlier release answers it `404 NOT_FOUND`. The
+public docs keep the full description under
+[get a session token](https://masterlydata.com/docs/reference/python-sdk/#get-a-session-token).
+
+An install running the **dev identity binding** (local development, and demo installs) mints
+one from an e-mail address instead, which is what `examples/demo_data.py` does behind
+`--dev-login`:
 
 ```python
 session = httpx.post(
@@ -88,8 +104,13 @@ session = httpx.post(
 token = session["session_token"]
 ```
 
-It expires, and it carries a person's authority over everything they can reach. It does not
-belong in a scheduled job — that is what the other persona is for.
+Either way it is a session, not a long-lived credential. It is you — the same roles, checked on
+every request, so a deactivation or a removed grant takes effect at once. It expires an hour
+after it is issued, and it counts under your Organization's session policy like any other
+session: the maximum session length runs from your original sign-in, not from the moment you
+issued the token. It is listed among your sessions in the app, where you revoke it like any
+other (`GET /v1/auth/sessions/mine` marks it `self_issued`). It does not belong in a scheduled
+job — that is what the other persona is for.
 
 ### A service-account token
 
