@@ -72,10 +72,13 @@ jobs:
       # file can set). Everything low and above fails the job. `--persona=regular` is the default,
       # named so a reader does not have to know that.
       # --collect: workflows and composite actions, and not .github/dependabot.yml, which zizmor
-      # would otherwise audit too. Dependabot policy is its own section of the convention.
+      # would otherwise audit too. Dependabot policy is its own section of the convention. Written
+      # with `=` and a comma on purpose: `--collect` takes several values, so a bare
+      # `--collect actions .` swallows the `.` as a fourth kind and exits 2 before auditing
+      # anything -- which is how this job's first run failed (MAS-172).
       # The policy (.github/zizmor.yml) is discovered from the repository root; a copy that has
       # gone missing fails this step loudly on every actions/*@vN, not silently.
-      - run: zizmor --persona=regular --offline --min-severity low --collect workflows --collect actions .
+      - run: zizmor --persona=regular --offline --min-severity low --collect=workflows,actions .
       # masterly-framework only: its workflow and policy must stay the canonical templates, byte
       # for byte. Everywhere else the guard is false and the step does nothing.
       - name: copies match their templates
