@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 import httpx
 
-from masterly._config import DataModelsApi, DomainsApi, WorkspacesApi
+from masterly._config import ConfigApi, DataModelsApi, DomainsApi, WorkspacesApi
 from masterly._extract import GoldenApi, ProductsApi
 from masterly._ingest import SourcesApi
 from masterly._precondition import (
@@ -118,6 +118,7 @@ class Client:
         self.workspaces = WorkspacesApi(self)
         self.domains = DomainsApi(self)
         self.data_models = DataModelsApi(self)
+        self.config = ConfigApi(self)
 
     @classmethod
     def for_service_account(
@@ -189,8 +190,9 @@ class Client:
         The typed surface is deliberately narrow: extract, ingest, and the configuration those
         two are defined against. Everything else is reached through here — including every
         governed write that has not earned a method of its own, which is why ``if_match``
-        exists. (The one typed method that takes it is
-        :meth:`~masterly.Client.data_models.update`.)
+        exists. (The typed methods that take it are
+        :meth:`~masterly.Client.data_models.update` and the three bundle applies on
+        ``client.config``, whose token is the preview's ``version``.)
 
         ``if_match`` is the revision this write replaces: pass the ``version`` field of the
         object you read, or a :class:`~masterly.Precondition`. Without it the write still lands

@@ -232,6 +232,38 @@ except ApiError as error:
 the same connection: auth, Environment, timeouts, and error mapping. It also takes `headers=`
 for anything per-request, such as an `Idempotency-Key`.
 
+### Applying a whole configuration states the revision its preview read
+
+Three operations move an Environment's *entire* promotable configuration at once — pulling it
+from the bound Git repository, importing a file set, and promoting it from another Environment —
+and each is two calls: a **preview** (the default, which writes nothing) and an **apply**.
+`client.config` wraps them, and the apply is a governed write like any other: the preview's
+`version` is one revision for everything the preview was computed from — the Environment's whole
+configuration *and* what the apply would write (the other Environment's configuration, the commit
+the ref resolved to, the files you submitted). Pass it as `if_match`; if any of it moved in
+between, the apply is refused and nothing is written. The recovery is a new preview.
+
+```python
+preview = client.config.pull()                              # dry run: the diff, no writes
+for area, diff in preview["diff"].items():
+    print(area, "created", diff["created"], "updated", diff["updated"])
+client.config.pull(if_match=preview["version"])             # applies exactly what you reviewed
+
+preview = client.config.import_files({"workspaces/sales.yaml": "name: Sales\n"})
+client.config.import_files({"workspaces/sales.yaml": "name: Sales\n"}, if_match=preview["version"])
+
+preview = client.config.promote("env_prod_eu", source="env_stage_eu")
+client.config.promote("env_prod_eu", source="env_stage_eu", if_match=preview["version"])
+```
+
+`if_match` is required on an apply — a bundle applied without one may land over changes nobody
+previewed. A job that means to apply whatever is there says so with
+`Precondition.unconditional()`, which the audit trail records as an unconditional write. A
+refused apply raises `ApiError` whose `conflict` names the configuration objects that moved
+(`changed_fields`, as `<type>/<id>`), never their values. These three take `if_match` from a
+release that is not published yet; an install on an earlier release ignores the header and
+answers the preview without a `version`.
+
 ## Errors
 
 The client is a thin, typed wrapper over the stable `/v1` REST contract — the same API
@@ -245,7 +277,8 @@ so running the same notebook twice never duplicates data.
 ## Configuration
 
 Extract and ingest run on a configuration someone built. These build it — enough to stand
-an Environment up from a script:
+an Environment up from a script (and `client.config`, above, previews and applies the whole of
+it at once):
 
 ```python
 client.workspaces.create("Demo")
