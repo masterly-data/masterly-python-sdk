@@ -207,3 +207,106 @@ class DataModelsApi:
 
     def _resolve(self, model: str) -> str:
         return resolve(self.list(), model, id_field="model_id", prefix="dm_", kind="data model")
+
+
+class ConfigApi:
+    """Configuration as a whole — previewing and applying a bundle of it (ADR 0032).
+
+    Three operations move an Environment's *entire* promotable configuration at once: pulling
+    it from the Environment's bound Git repository, importing a file set, and promoting it
+    from another Environment. Each is two calls: a **preview** (``dry_run=True``, the
+    default), which computes the per-area diff and writes nothing, and an **apply**, which
+    writes what the preview showed.
+
+    **An apply states the revision its preview read** (ADR 0070). The preview carries a
+    ``version`` — one revision for everything it was computed from: this Environment's whole
+    configuration, and what the apply would write (the other Environment's configuration, the
+    commit the ref resolved to, or the files you submitted). Pass it as ``if_match`` on the
+    apply. If any of it moved in between — a colleague saved a rule set, the branch got a
+    commit, you edited a file after reviewing — the apply is refused with a 409 whose
+    :attr:`~masterly.ApiError.conflict` names what moved, and nothing is written. The recovery
+    is a new preview. Preview, review, apply::
+
+        preview = client.config.pull()                       # dry run: the diff, no writes
+        for area, diff in preview["diff"].items():
+            print(area, diff["created"], diff["updated"])
+        client.config.pull(if_match=preview["version"])      # applies exactly what you saw
+
+    ``if_match`` is required on an apply: a bundle applied without one may land over changes
+    nobody previewed, which is the loss the token exists to prevent. A scripted job that means
+    to overwrite whatever is there says so with ``Precondition.unconditional()``, which the
+    audit trail records as an unconditional write.
+
+    Session routes: a service-account connection cannot reach configuration.
+    """
+
+    def __init__(self, client: Client) -> None:
+        self._client = client
+
+    def pull(
+        self,
+        *,
+        ref: str | None = None,
+        if_match: Precondition | str | int | None = None,
+    ) -> dict[str, Any]:
+        """Pull configuration from the Environment's bound Git repository (GitOps mode).
+
+        Without ``if_match`` this is the preview: the diff at ``ref`` (the tracked branch by
+        default) against the current configuration, and the ``version`` to apply it with.
+        With ``if_match`` — the preview's ``version`` — it applies, and is refused with 409
+        ``VERSION_CONFLICT`` if the configuration here or the branch head moved since.
+        """
+        body: dict[str, Any] = {"dry_run": if_match is None}
+        if ref is not None:
+            body["ref"] = ref
+        return self._apply("POST", "/v1/config:pull", body, if_match)
+
+    def import_files(
+        self,
+        files: Mapping[str, str],
+        *,
+        if_match: Precondition | str | int | None = None,
+    ) -> dict[str, Any]:
+        """Import a configuration file set — ``{path: content}``, in the repository layout
+        ``client.request("GET", "/v1/config:export")`` produces — into the Environment.
+
+        Without ``if_match`` this is the preview. With it — the preview's ``version``, which
+        also pins the files themselves — it applies, and is refused if the configuration
+        moved or the files differ from the ones previewed.
+        """
+        body: dict[str, Any] = {
+            "files": [{"path": path, "content": content} for path, content in files.items()],
+            "dry_run": if_match is None,
+        }
+        return self._apply("POST", "/v1/config:import", body, if_match)
+
+    def promote(
+        self,
+        target: str,
+        *,
+        source: str,
+        if_match: Precondition | str | int | None = None,
+    ) -> dict[str, Any]:
+        """Promote configuration from the ``source`` Environment into the ``target`` one, both
+        by Environment id (Organization-scoped: the connection's Environment is not consulted).
+
+        Without ``if_match`` this is the preview. With it — the preview's ``version``, which
+        covers both Environments' configuration as the preview read them — it applies, and is
+        refused if either moved since. Promoting into a production Environment requires the
+        Organization Owner.
+        """
+        body = {"source_environment_id": source, "dry_run": if_match is None}
+        return self._apply("POST", f"/v1/environments/{target}/config:promote-from", body, if_match)
+
+    def _apply(
+        self,
+        method: str,
+        path: str,
+        body: dict[str, Any],
+        if_match: Precondition | str | int | None,
+    ) -> dict[str, Any]:
+        self._client._require_session(
+            "Configuration", "Use a session token; a service account holds no configuration."
+        )
+        answer: dict[str, Any] = self._client._request(method, path, json=body, if_match=if_match)
+        return answer
