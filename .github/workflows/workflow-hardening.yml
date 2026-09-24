@@ -1,0 +1,89 @@
+name: workflow-hardening
+
+# The workflow rules in masterly-framework docs/conventions/github-repo-settings.md -- third-party
+# actions pinned by SHA, persist-credentials: false on every checkout, pull_request never
+# pull_request_target, least-privilege permissions, no untrusted context spliced into a shell --
+# were enforced by nothing (MAS-172). Each was a grep in the doc, run when someone remembered, and
+# what caught a miss was Aikido filing a card weeks later: for MAS-171 it named 3 of the 36
+# checkouts. zizmor checks all of them in one pass, offline, in seconds, with the policy in
+# .github/zizmor.yml. The greps stay in the convention for a local look; this is the enforcement.
+
+# One source (MAS-172): the canonical copy of this workflow is masterly-framework
+# repo-templates/zizmor/workflow-hardening.yml, next to the policy it runs
+# (repo-templates/zizmor/zizmor.yml, copied to .github/zizmor.yml). Every repo that has workflows
+# -- masterly-framework included -- holds VERBATIM copies at both paths. Change them in
+# masterly-framework and re-copy; never edit a copy in place. The last step keeps
+# masterly-framework's own copies honest and is a no-op anywhere else.
+
+# Quoted because bare `on` is a YAML 1.1 boolean: a strict parser reads this
+# key as True, not "on". GitHub Actions reads it either way; the quotes are for
+# everything else that parses this file.
+"on":
+  pull_request:
+  # The merge queue tests the speculative merge, not the branch head. Without this trigger a
+  # required check never reports for a queued entry and the queue stalls until it times out.
+  # Inert in a repo without a merge queue.
+  merge_group:
+  push:
+    branches: [main]
+
+# Deliberately no path filter. A required check that does not run on a pull request blocks it
+# forever (github-repo-settings.md, "Required status checks"), and the audit takes seconds.
+
+# A re-push supersedes the run before it, so cancel the superseded PR run rather than pay
+# for a result nobody will read. Guarded to pull_request: a push to main must never be
+# cancelled by whatever lands next. MAS-174.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege (MAS-135): the workflow grants nothing; the one job asks for the one scope
+# actions/checkout needs to clone a private repo.
+permissions: {}
+
+jobs:
+  zizmor:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/checkout
+    steps:
+      # persist-credentials: false -- actions/checkout otherwise leaves the job's
+      # GITHUB_TOKEN in .git/config for the rest of the run, where any later step or
+      # third-party action can read it. Nothing here pushes, so the token has no job to do
+      # after the checkout. See masterly-framework docs/conventions/github-repo-settings.md,
+      # "Checkout credentials" (MAS-171).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      # Pinned to a release, by hand: Dependabot's github-actions ecosystem does not read a pip
+      # spec inside a run step. A new zizmor release can add audits, so a bump changes what the
+      # gate refuses and is reviewed like one -- run it over every repo before raising it here.
+      - run: pip install zizmor==1.30.1
+      # --offline: the registry-backed audits (impostor-commit, known-vulnerable-actions,
+      # ref-confusion) need the GitHub API, and a gate that fails on a rate limit or an outage
+      # is a gate people learn to re-run past -- the same reason the link checker fetches
+      # nothing. Vulnerable action versions reach us through Dependabot security alerts, which
+      # cover the github-actions ecosystem.
+      # --min-severity low: an informational finding is one zizmor itself does not rate as a
+      # security issue (a repository variable spliced into a shell line, a step output only this
+      # file can set). Everything low and above fails the job. `--persona=regular` is the default,
+      # named so a reader does not have to know that.
+      # --collect: workflows and composite actions, and not .github/dependabot.yml, which zizmor
+      # would otherwise audit too. Dependabot policy is its own section of the convention. Written
+      # with `=` and a comma on purpose: `--collect` takes several values, so a bare
+      # `--collect actions .` swallows the `.` as a fourth kind and exits 2 before auditing
+      # anything -- which is how this job's first run failed (MAS-172).
+      # The policy (.github/zizmor.yml) is discovered from the repository root; a copy that has
+      # gone missing fails this step loudly on every actions/*@vN, not silently.
+      - run: zizmor --persona=regular --offline --min-severity low --collect=workflows,actions .
+      # masterly-framework only: its workflow and policy must stay the canonical templates, byte
+      # for byte. Everywhere else the guard is false and the step does nothing.
+      - name: copies match their templates
+        run: |
+          if [ -d repo-templates/zizmor ]; then
+            cmp repo-templates/zizmor/workflow-hardening.yml .github/workflows/workflow-hardening.yml
+            cmp repo-templates/zizmor/zizmor.yml .github/zizmor.yml
+          fi

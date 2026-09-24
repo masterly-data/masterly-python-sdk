@@ -18,9 +18,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege: the workflow grants nothing, and each job states the one scope it needs --
+# reading the repository for actions/checkout. Nothing here writes through the token, and
+# publishing lives in release.yml. Without a block the token's scopes are whatever the
+# repository setting says, which is not something a reader of this file can see.
+permissions: {}
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:

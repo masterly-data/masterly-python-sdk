@@ -70,7 +70,14 @@ jobs:
       # here claiming one would be a provenance claim a customer can read, and wrong.
       - name: Refuse a tag the release record will not stand behind
         run: python3 scripts/check_release_record.py --tag "${GITHUB_REF_NAME}"
+      # No cache on the release build. setup-uv restores uv's cache from the Actions cache
+      # service by default, and this job builds the artifact that publishes to PyPI: a cache
+      # entry poisoned by any earlier job holding this repository's GITHUB_TOKEN would feed the
+      # build backend straight into what ships. A cold cache costs seconds here; the wheel is
+      # built from the tag alone, with everything fetched fresh from PyPI.
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10, pinned by digest
+        with:
+          enable-cache: false
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
