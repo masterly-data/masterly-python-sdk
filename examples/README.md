@@ -114,8 +114,11 @@ says so and leaves the attribute empty rather than quarantining every record.
 - `--dev-login EMAIL` mints a session on installs running the **dev identity binding**
   (local development, the demo install). It sends the credential as `dev:<email>`.
 - `--token` (or `MASTERLY_TOKEN`) takes a session token from any install — use this on
-  Stytch or OIDC bindings. `--base-url` and `--environment` also read
-  `MASTERLY_BASE_URL` / `MASTERLY_ENVIRONMENT`.
+  Stytch or OIDC bindings. Issue one from the app you are signed in to, as described under
+  [A session token](../README.md#a-session-token): it is a session, not a long-lived
+  credential, so it expires an hour after it is issued. A run that outlives it stops with a
+  `401`; rerun with a fresh token — re-delivery upserts by source key, so nothing doubles.
+  `--base-url` and `--environment` also read `MASTERLY_BASE_URL` / `MASTERLY_ENVIRONMENT`.
 
 Bootstrapping needs `workspace:create`, `domain:create`, `data-model:create`,
 `data-model:update`, `source:create` and `ingest:run` in the target Environment — the
