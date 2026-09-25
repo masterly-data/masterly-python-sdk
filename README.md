@@ -42,11 +42,14 @@ eu = job.products.read(
 feed = job.products.changes("dp_a1b2c3", cursor=saved_cursor)
 for change in feed:
     ...
-save(feed.cursor)  # persist for the next run
+save(feed.cursor)  # persist for the next run: an opaque token, never parsed
 
 # Ingest, on a schedule: only the Sources this account's `ingest` scope names
 job.sources.ingest("src_7f3c9a", records)
 ```
+
+The change-feed cursor is an opaque token. Store it and pass it back exactly as you received
+it; do not parse it, build one, or compare two, because its format is the server's to change.
 
 ## Two token personas
 
@@ -172,6 +175,44 @@ the account. Either way it goes in the `token` argument above.
 
 Scopes are fixed when the account is created. Widening one is not a permission someone grants
 after the fact — it is a new account, and the old one is revoked.
+
+## Deletes, full snapshots and record history
+
+A record upserts by its source key. To delete one instead, send its key with `"op": "delete"`
+in the same batch as everything else:
+
+```python
+client.sources.ingest("crm", [
+    {"customer_number": "C-1001", "name": "Acme AB"},   # upsert
+    {"op": "delete", "customer_number": "C-0042"},      # delete by source key
+])
+```
+
+A deleted record is tombstoned, not erased: it leaves its entity, the golden record
+recomputes without it, and its history stays readable. A delete for a key the source does not
+hold does nothing.
+
+When a system can only hand over everything it has, send it as a **full snapshot**: every live
+record of the Source that the snapshot does not carry is deleted after the upserts.
+
+```python
+client.sources.ingest("crm", every_customer, mode="full", batch_size=5000)
+```
+
+The platform reconciles each call on its own, so a full snapshot travels as one call, and the
+client refuses one that does not fit `batch_size` before it sends anything. The install caps
+how many records one call may carry (5,000 unless it set its own); over that cap the call is
+refused with `INGEST_BATCH_TOO_LARGE`, and nothing is deleted.
+
+Every state a record has been in, newest first, and the undo for a delete (both session routes;
+`record_id` is the record's `rec_…` id, not its source key):
+
+```python
+for state in client.sources.history("crm", "rec_01J9Z3"):
+    print(state["version"], state["valid_from"], state["valid_to"], state["data"])
+
+client.sources.restore("crm", "rec_01J9Z3")   # {"job_id": ...}; needs `record:author`
+```
 
 ## Governed writes: state the revision you are replacing
 
