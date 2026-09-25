@@ -147,6 +147,105 @@ def test_ingest_chunks_batches() -> None:
     assert all(b["source_id"] == "src_1" for b in bodies)
 
 
+def test_incremental_ingest_sends_no_mode_and_passes_delete_rows_through() -> None:
+    """The default leaves the envelope as it always was, so an install that predates `mode`
+    sees the same body. A delete is a record carrying `op`, sent as the caller wrote it."""
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(202, json={"job_id": "j"})
+
+    records = [{"ext_id": "1", "name": "Acme"}, {"op": "delete", "ext_id": "2"}]
+    _client(handler).sources.ingest("src_1", records)
+    assert bodies == [{"source_id": "src_1", "records": records}]
+
+
+def test_a_full_snapshot_travels_as_one_call_naming_its_mode() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(202, json={"job_id": "j"})
+
+    records = [{"ext_id": str(i)} for i in range(3)]
+    report = _client(handler).sources.ingest("src_1", records, mode="full", batch_size=3)
+    assert report.batches == 1
+    assert bodies == [{"source_id": "src_1", "records": records, "mode": "full"}]
+
+
+@pytest.mark.parametrize(
+    ("records", "match"),
+    [
+        ([{"ext_id": str(i)} for i in range(3)], "one call"),
+        ([], "at least one record"),
+    ],
+)
+def test_a_full_snapshot_that_would_split_is_refused_before_the_wire(
+    records: list[dict[str, Any]], match: str
+) -> None:
+    """The platform reconciles each call on its own, so a snapshot chunked across calls would
+    have every chunk delete what the others carry. Nothing is sent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("the request must not be sent")
+
+    with pytest.raises(ValueError, match=match):
+        _client(handler).sources.ingest("src_1", records, mode="full", batch_size=2)
+
+
+def test_an_unknown_ingest_mode_is_refused() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        raise AssertionError("the request must not be sent")
+
+    with pytest.raises(ValueError, match="'incremental' or 'full'"):
+        _client(handler).sources.ingest("src_1", [{"k": 1}], mode="snapshot")  # type: ignore[arg-type]
+
+
+def test_record_history_pages_through_its_cursor() -> None:
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sources":
+            return httpx.Response(200, json={"items": [{"source_id": "src_1", "name": "crm"}]})
+        params = dict(request.url.params)
+        calls.append((request.url.path, params))
+        if "cursor" not in params:
+            return httpx.Response(200, json={"items": [{"version": 2}], "next_cursor": "h2"})
+        return httpx.Response(200, json={"items": [{"version": 1}], "next_cursor": None})
+
+    states = list(_client(handler).sources.history("crm", "rec_1"))
+    assert [s["version"] for s in states] == [2, 1]
+    path = "/v1/sources/src_1/records/rec_1/history"
+    assert calls == [(path, {"limit": "200"}), (path, {"limit": "200", "cursor": "h2"})]
+
+
+def test_restore_posts_the_colon_action_and_returns_the_receipt() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(202, json={"job_id": "job_9"})
+
+    assert _client(handler).sources.restore("src_1", "rec_1") == {"job_id": "job_9"}
+    assert (seen[-1].method, seen[-1].url.path) == (
+        "POST",
+        "/v1/sources/src_1/records/rec_1:restore",
+    )
+    assert not seen[-1].content
+
+
+def test_restoring_a_live_record_is_refused_by_the_server() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, json={"error": {"code": "RECORD_NOT_DELETED", "message": "not deleted"}}
+        )
+
+    with pytest.raises(ApiError) as raised:
+        _client(handler).sources.restore("src_1", "rec_1")
+    assert raised.value.code == "RECORD_NOT_DELETED"
+
+
 def test_error_envelope_raises_api_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

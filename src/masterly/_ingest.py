@@ -16,14 +16,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
+from masterly._extract import RowPages
 from masterly._paging import all_items
 
 if TYPE_CHECKING:
     from masterly._client import Client
 
 _BATCH_SIZE = 500
+
+#: How a batch relates to what the source already holds. ``incremental`` applies only what
+#: the batch names; ``full`` declares it the source's complete snapshot.
+IngestMode = Literal["incremental", "full"]
 
 
 @dataclass(frozen=True)
@@ -146,11 +151,28 @@ class SourcesApi:
         records: Sequence[dict[str, Any]],
         *,
         batch_size: int = _BATCH_SIZE,
+        mode: IngestMode = "incremental",
     ) -> IngestReport:
         """Deliver records to a source, chunked into accepted batches.
 
         Re-delivery is safe: records upsert by their source key, so running the same
         notebook twice never duplicates data.
+
+        **Deleting.** A record that carries ``"op": "delete"`` together with its key field(s)
+        deletes the record with that key rather than upserting it —
+        ``{"op": "delete", "customer_number": "C-1001"}``. The record is tombstoned, not
+        erased: its history closes, it stays readable, and :meth:`restore` undoes it. A delete
+        for a key the source does not hold is a no-op. ``op`` is read by the platform and never
+        stored as data.
+
+        **Modes.** ``mode="incremental"`` (the default) applies only what the records name.
+        ``mode="full"`` declares ``records`` the source's COMPLETE snapshot: after the upserts,
+        every live record of the source whose key the snapshot does not carry is deleted, as
+        above. The platform reconciles per call, so a full snapshot is sent as exactly one
+        batch — this refuses, before sending anything, one that does not fit ``batch_size``.
+        Raise ``batch_size`` up to the install's per-call record cap (5,000 unless the install
+        set its own) for a larger snapshot; over that cap the call is refused with
+        :class:`~masterly.ApiError` code ``INGEST_BATCH_TOO_LARGE``, and nothing is deleted.
 
         Both token personas ingest (:meth:`~masterly.Client.for_service_account`): a session
         token holding ``ingest:run`` may target any Source in its Environment, and a service
@@ -160,12 +182,55 @@ class SourcesApi:
         """
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
+        if mode not in get_args(IngestMode):
+            raise ValueError(f"mode is 'incremental' or 'full', not {mode!r}")
+        if mode == "full":
+            # Each call is reconciled on its own, so a snapshot split across calls would have
+            # every chunk delete the records the other chunks carry.
+            if not records:
+                raise ValueError(
+                    "a full snapshot carries at least one record — an empty one would say the "
+                    "source holds nothing, and the platform does not accept it"
+                )
+            if len(records) > batch_size:
+                raise ValueError(
+                    f"a full snapshot is one call: {len(records)} records do not fit "
+                    f"batch_size={batch_size}. Raise batch_size (up to the install's record "
+                    "cap), or deliver incrementally"
+                )
         source_id = self._resolve(source)
         batches = 0
         for start in range(0, len(records), batch_size):
             chunk = records[start : start + batch_size]
-            self._client._request(
-                "POST", "/v1/ingest", json={"source_id": source_id, "records": chunk}
-            )
+            body: dict[str, Any] = {"source_id": source_id, "records": chunk}
+            if mode != "incremental":
+                body["mode"] = mode
+            self._client._request("POST", "/v1/ingest", json=body)
             batches += 1
         return IngestReport(source_id=source_id, records=len(records), batches=batches)
+
+    def history(self, source: str, record_id: str) -> RowPages:
+        """Every state a source record has been in, newest first, paged lazily.
+
+        One row per state (``version_id``, ``version``, ``data``, and ``valid_from`` /
+        ``valid_to``): the current state has no ``valid_to``, and a deleted record's last
+        state is closed with no successor. ``record_id`` is the record's own id (``rec_…``),
+        not its source key. The values are shaped by the same field masks as any other read
+        of the record. Session persona only.
+        """
+        return RowPages(
+            self._client, f"/v1/sources/{self._resolve(source)}/records/{record_id}/history"
+        )
+
+    def restore(self, source: str, record_id: str) -> dict[str, Any]:
+        """Undo a delete: reopen the record and return it to its entity, which recomputes.
+
+        Asynchronous like ingest — the answer is the job receipt (``{"job_id": ...}``), and
+        golden resolution runs after it. A record that is not deleted is refused with
+        :class:`~masterly.ApiError` code ``RECORD_NOT_DELETED``. Needs the ``record:author``
+        permission; session persona only.
+        """
+        accepted: dict[str, Any] = self._client._request(
+            "POST", f"/v1/sources/{self._resolve(source)}/records/{record_id}:restore"
+        )
+        return accepted

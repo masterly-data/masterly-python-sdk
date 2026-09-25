@@ -18,7 +18,7 @@ personas" says how to get either one.
 
 from masterly._client import ApiError, Client, Persona
 from masterly._extract import ChangeFeed, RowPages
-from masterly._ingest import IngestReport
+from masterly._ingest import IngestMode, IngestReport
 from masterly._precondition import Conflict, Precondition
 
 __version__ = "0.3.0"
@@ -28,6 +28,7 @@ __all__ = [
     "ChangeFeed",
     "Client",
     "Conflict",
+    "IngestMode",
     "IngestReport",
     "Persona",
     "Precondition",

@@ -78,7 +78,11 @@ class RowPages:
 
 class ChangeFeed:
     """The product change feed with a **resumable cursor** (persist ``feed.cursor`` after a
-    run and pass it back next time — every change is delivered at least once)."""
+    run and pass it back next time — every change is delivered at least once).
+
+    The cursor is an opaque token: store it and hand it back exactly as you received it. Do
+    not parse it, build one, or compare two — its format is the server's to change.
+    """
 
     def __init__(self, client: Client, path: str, cursor: str | None) -> None:
         self._client = client
@@ -176,7 +180,8 @@ class ProductsApi:
         return RowPages(self._client, path, params)
 
     def changes(self, product: str, cursor: str | None = None) -> ChangeFeed:
-        """Changes since ``cursor`` (or from the beginning). Persist ``feed.cursor``."""
+        """Changes since ``cursor`` (or from the beginning). Persist ``feed.cursor``, an
+        opaque token: pass it back unchanged, and never parse it."""
         product_id = self._resolve(product)
         return ChangeFeed(self._client, f"/v1/consume/products/{product_id}/changes", cursor)
 
