@@ -295,11 +295,13 @@ client.data_models.create("Customer", domain="Sales", definition={...})
 client.data_models.publish("Customer")
 
 client.sources.create(
-    "erp",
+    "erp",                                     # the fixed name: a slug, never changed
+    display_name="SAP ERP",                    # the label people read; change it any time
     target_model="Customer",
     source_key="customer_number",              # required: without it every record quarantines
     field_map={"KUNNR": "customer_number", "NAME1": "name"},
 )
+client.sources.update("erp", display_name="SAP ERP (Sweden)")
 ```
 
 Everything takes an id or an exact name, so a script reads the way the domain is discussed.
