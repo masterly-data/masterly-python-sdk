@@ -234,6 +234,17 @@ def test_source_edit_travels_with_the_revision_it_replaces() -> None:
     assert updated["version"] == 8
 
 
+def test_a_source_edit_without_if_match_sends_no_precondition() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["headers"] = request.headers
+        return httpx.Response(200, json={"source_id": "src_1"})
+
+    _client(handler).sources.update("src_1", display_name="CRM")
+    assert "if-match" not in seen["headers"]
+
+
 def test_a_source_edit_accepts_a_precondition_object() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["if-match"] == '"4"'
