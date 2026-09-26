@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from masterly._extract import RowPages
 from masterly._paging import all_items
+from masterly._precondition import Precondition
 
 if TYPE_CHECKING:
     from masterly._client import Client
@@ -68,8 +69,14 @@ class SourcesApi:
         field_map: Mapping[str, str] | None = None,
         system_type: str = "rest",
         mode: str = "push",
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         """Register a Source that delivers into a model.
+
+        ``name`` is the Source's identity and never changes once it exists: a slug of lowercase
+        letters, digits and single hyphens (``crm``, ``erp-suppliers``), at most 63 characters.
+        ``display_name`` is the label people read in the product — free text that can be
+        changed later with :meth:`update`; it defaults to ``name``.
 
         ``source_key`` names the model attribute (or attributes) that form this system's
         natural key, AFTER the field map has been applied — it is required because a source
@@ -87,6 +94,8 @@ class SourcesApi:
             "target_model": target_model,
             "mapping": {"field_map": dict(field_map or {}), "source_key": key},
         }
+        if display_name is not None:
+            body["display_name"] = display_name
         created: dict[str, Any] = self._client._request("POST", "/v1/sources", json=body)
         return created
 
@@ -94,12 +103,24 @@ class SourcesApi:
         self,
         source: str,
         *,
+        if_match: Precondition | str | int | None = None,
         name: str | None = None,
         system_type: str | None = None,
         target_model: str | None = None,
         mapping: Mapping[str, Any] | None = None,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         """Edit a Source.
+
+        ``if_match`` is the ``version`` of the Source you read. Pass it: someone else may have
+        edited the Source since, and a governed write says which revision it replaces rather
+        than overwriting whatever it finds (ADR 0070). Leaving it out sends no ``If-Match``,
+        which is the deprecated unguarded form — the server still accepts it today and answers
+        with a ``Deprecation`` header.
+
+        ``display_name`` relabels the Source. Its ``name`` never changes: the server refuses a
+        different one with 409 ``SOURCE_NAME_IMMUTABLE`` and accepts the current one, so the
+        parameter is only there for a caller that sends the whole object back.
 
         ``mapping`` REPLACES the mapping document, so pass the one you read from
         :meth:`get` with your edit applied — assembling a partial drops whatever else it
@@ -108,6 +129,8 @@ class SourcesApi:
         body: dict[str, Any] = {}
         if name is not None:
             body["name"] = name
+        if display_name is not None:
+            body["display_name"] = display_name
         if system_type is not None:
             body["system_type"] = system_type
         if target_model is not None:
@@ -115,7 +138,7 @@ class SourcesApi:
         if mapping is not None:
             body["mapping"] = dict(mapping)
         updated: dict[str, Any] = self._client._request(
-            "PATCH", f"/v1/sources/{self._resolve(source)}", json=body
+            "PATCH", f"/v1/sources/{self._resolve(source)}", json=body, if_match=if_match
         )
         return updated
 

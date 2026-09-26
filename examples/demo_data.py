@@ -1177,7 +1177,9 @@ def ensure_source(client: Client, spec: SourceSpec, model_name: str) -> dict[str
         # it through the mapping it already has, so nothing else on the document is lost.
         if not key:
             mapping = {**source.get("mapping", {}), "source_key": [spec.key_attribute]}
-            source = client.sources.update(str(source["source_id"]), mapping=mapping)
+            source = client.sources.update(
+                str(source["source_id"]), mapping=mapping, if_match=source["version"]
+            )
             print(f"  repaired Source '{spec.name}' — it had no source key")
         return dict(source)
     created = client.sources.create(
