@@ -697,6 +697,7 @@ def test_a_source_is_created_and_relabelled_by_its_display_name() -> None:
     )
     assert json.loads(seen[-1].content)["display_name"] == "Salesforce CRM"
 
-    client.sources.update("src_1", display_name="CRM")
+    client.sources.update("src_1", display_name="CRM", if_match=2)
     assert seen[-1].method == "PATCH"
+    assert seen[-1].headers["if-match"] == '"2"'
     assert json.loads(seen[-1].content) == {"display_name": "CRM"}

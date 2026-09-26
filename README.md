@@ -301,16 +301,18 @@ client.sources.create(
     source_key="customer_number",              # required: without it every record quarantines
     field_map={"KUNNR": "customer_number", "NAME1": "name"},
 )
-client.sources.update("erp", display_name="SAP ERP (Sweden)")
+
+source = client.sources.get("erp")
+client.sources.update("erp", display_name="SAP ERP (Sweden)", if_match=source["version"])
 ```
 
 Everything takes an id or an exact name, so a script reads the way the domain is discussed.
 A model's `definition` carries its attributes, keys and constraints — ingest validates every
 record against them, so widening or tightening one changes what the pipeline accepts.
 
-Editing a model is a **governed write**: more than one person edits models, and the edit is
-derived from a read, so `update` states the revision it replaces (ADR 0070) and a stale one
-is refused rather than silently overwriting:
+Editing a model or a source is a **governed write**: more than one person edits them, and the
+edit is derived from a read, so `update` states the revision it replaces (ADR 0070) and a stale
+one is refused rather than silently overwriting:
 
 ```python
 model = client.data_models.get("Customer")

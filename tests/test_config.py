@@ -213,9 +213,35 @@ def test_source_update_replaces_the_mapping_document_it_is_given() -> None:
         return httpx.Response(200, json={"source_id": "src_1"})
 
     mapping = {"field_map": {}, "source_key": ["sku"], "translations": []}
-    _client(handler).sources.update("src_1", mapping=mapping)
+    _client(handler).sources.update("src_1", mapping=mapping, if_match=3)
     assert (seen["method"], seen["path"]) == ("PATCH", "/v1/sources/src_1")
     assert seen["body"] == {"mapping": mapping}
+
+
+def test_source_edit_travels_with_the_revision_it_replaces() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sources" and request.method == "GET":
+            return _page([{"source_id": "src_1", "name": "crm"}])
+        seen["if_match"] = request.headers.get("if-match")
+        seen["method"], seen["path"] = request.method, request.url.path
+        return httpx.Response(200, json={"source_id": "src_1", "version": 8})
+
+    updated = _client(handler).sources.update("crm", display_name="Salesforce CRM", if_match=7)
+    assert (seen["method"], seen["path"]) == ("PATCH", "/v1/sources/src_1")
+    assert seen["if_match"] == '"7"'  # the bare version, quoted as a strong entity-tag
+    assert updated["version"] == 8
+
+
+def test_a_source_edit_accepts_a_precondition_object() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["if-match"] == '"4"'
+        return httpx.Response(200, json={"source_id": "src_1"})
+
+    _client(handler).sources.update(
+        "src_1", display_name="CRM", if_match=Precondition.from_version(4)
+    )
 
 
 def test_source_stats_reads_the_counters() -> None:

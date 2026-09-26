@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from masterly._extract import RowPages
 from masterly._paging import all_items
+from masterly._precondition import Precondition
 
 if TYPE_CHECKING:
     from masterly._client import Client
@@ -102,6 +103,7 @@ class SourcesApi:
         self,
         source: str,
         *,
+        if_match: Precondition | str | int,
         name: str | None = None,
         system_type: str | None = None,
         target_model: str | None = None,
@@ -109,6 +111,10 @@ class SourcesApi:
         display_name: str | None = None,
     ) -> dict[str, Any]:
         """Edit a Source.
+
+        ``if_match`` is the ``version`` of the Source you read — required, because someone
+        else may have edited it since, and a governed write says which revision it replaces
+        rather than overwriting whatever it finds.
 
         ``display_name`` relabels the Source. Its ``name`` never changes: the server refuses a
         different one with 409 ``SOURCE_NAME_IMMUTABLE`` and accepts the current one, so the
@@ -130,7 +136,7 @@ class SourcesApi:
         if mapping is not None:
             body["mapping"] = dict(mapping)
         updated: dict[str, Any] = self._client._request(
-            "PATCH", f"/v1/sources/{self._resolve(source)}", json=body
+            "PATCH", f"/v1/sources/{self._resolve(source)}", json=body, if_match=if_match
         )
         return updated
 
