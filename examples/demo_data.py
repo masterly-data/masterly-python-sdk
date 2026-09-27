@@ -3,7 +3,10 @@
 
 Run it against an empty Environment and it bootstraps what it needs — Workspace, Domain,
 Data Models (published), and one Source per originating system — then generates a
-population of business entities and delivers them over ``POST /v1/ingest``.
+population of business entities and delivers them over ``POST /v1/ingest``. The models link
+to each other — customers and suppliers to a Country code list, products to their supplier,
+a subsidiary to its parent company, a customer to its embedded contact — so every
+relationship view has something to show.
 
 What makes the data *useful* rather than merely random: the same real-world entity is
 delivered by several source systems under different keys, in that system's own field
@@ -175,6 +178,67 @@ COUNTRY_REGEX = r"^[A-Z]{2}$"
 POSTAL_REGEX = r"^[0-9A-Za-z][0-9A-Za-z \-]{2,9}$"
 VAT_REGEX = r"^[A-Z]{2}[0-9A-Z]{8,12}$"
 GTIN_REGEX = r"^\d{13}$"
+CURRENCY_REGEX = r"^[A-Z]{3}$"
+
+# --------------------------------------------------------------------------------------
+# Relationships. A relationship in Masterly IS a `reference` or `nested` attribute: a
+# reference holds the business-key value of a record in its target model, and a nested
+# attribute embeds the child record itself. The models below link to each other the four
+# ways a demo needs to show:
+#
+#   Customer.country         -> Country   many-to-one, onto a reference model
+#   Supplier.country         -> Country   many-to-one
+#   Product.supplier         -> Supplier  many-to-one, between two entity models
+#   Customer.parent_customer -> Customer  a self-reference: the parent company
+#   Customer.primary_contact -> Contact   nested: the contact record, embedded
+#
+# Every target model names a `display_attribute`, so a relationship reads as the target's
+# name ("Sweden", "Nordwind Logistik AB") rather than its key ("SE", "556123-4567").
+#
+# A self-reference names the model's OWN name as its target. That is what the platform
+# accepts today; `"self"` is refused on an attribute until the API catches up.
+# --------------------------------------------------------------------------------------
+
+# code, name, region, currency — every country the generated addresses use.
+COUNTRIES = [
+    ("SE", "Sweden", "Nordics", "SEK"),
+    ("NO", "Norway", "Nordics", "NOK"),
+    ("DK", "Denmark", "Nordics", "DKK"),
+    ("FI", "Finland", "Nordics", "EUR"),
+    ("DE", "Germany", "Western Europe", "EUR"),
+    ("NL", "Netherlands", "Western Europe", "EUR"),
+    ("GB", "United Kingdom", "Western Europe", "GBP"),
+    ("FR", "France", "Western Europe", "EUR"),
+    ("PL", "Poland", "Central Europe", "PLN"),
+]
+
+COUNTRY_DEFINITION: dict[str, Any] = {
+    "attributes": [
+        {"name": "code", "type": "string", "required": True, "unique": True,
+         "regex": COUNTRY_REGEX, "description": "ISO 3166-1 alpha-2 country code"},
+        {"name": "name", "type": "string", "required": True},
+        {"name": "region", "type": "enum",
+         "enum_values": ["Nordics", "Western Europe", "Central Europe"]},
+        {"name": "currency", "type": "string", "regex": CURRENCY_REGEX,
+         "description": "ISO 4217 code of the country's currency"},
+    ],
+    # A reference model is keyed on the code everyone shares — which is also each source's
+    # own key, because a code list has one identifier and no per-system numbering.
+    "keys": [{"name": "code", "attributes": ["code"]}],
+    "display_attribute": "name",
+}
+
+CONTACT_DEFINITION: dict[str, Any] = {
+    "attributes": [
+        {"name": "name", "type": "string", "required": True, "classification": "pii"},
+        {"name": "email", "type": "string", "classification": "pii", "regex": EMAIL_REGEX},
+        {"name": "phone", "type": "string", "classification": "pii"},
+        {"name": "role", "type": "enum",
+         "enum_values": ["purchasing", "finance", "logistics", "management"]},
+    ],
+    "keys": [{"name": "email", "attributes": ["email"]}],
+    "display_attribute": "name",
+}
 
 CUSTOMER_DEFINITION: dict[str, Any] = {
     "attributes": [
@@ -190,7 +254,8 @@ CUSTOMER_DEFINITION: dict[str, Any] = {
         {"name": "street", "type": "string", "classification": "pii"},
         {"name": "postal_code", "type": "string", "regex": POSTAL_REGEX},
         {"name": "city", "type": "string"},
-        {"name": "country", "type": "string", "regex": COUNTRY_REGEX},
+        {"name": "country", "type": "reference", "target_model": "Country",
+         "regex": COUNTRY_REGEX, "description": "The country's ISO code — links to Country"},
         {"name": "industry", "type": "string"},
         {"name": "segment", "type": "enum",
          "enum_values": ["enterprise", "mid-market", "small-business", "public-sector"]},
@@ -199,12 +264,19 @@ CUSTOMER_DEFINITION: dict[str, Any] = {
         {"name": "annual_revenue_sek", "type": "number", "min_value": 0},
         {"name": "employees", "type": "number", "min_value": 0, "max_value": 500000},
         {"name": "customer_since", "type": "date"},
+        {"name": "parent_customer", "type": "reference", "target_model": "Customer",
+         "description": "The parent company's registration number, for a subsidiary — a "
+                        "reference from Customer to Customer"},
+        {"name": "primary_contact", "type": "nested", "target_model": "Contact",
+         "classification": "pii",
+         "description": "The contact person, embedded as a Contact record"},
     ],
     # The business key is the registration number, NOT `customer_number`. Each system has
     # its own customer number, so keying on it mints one entity per system — deterministic
     # resolution would have nothing to resolve. The registration number is the identifier
     # the systems actually share, which is what makes it a business key.
     "keys": [{"name": "org_number", "attributes": ["org_number"]}],
+    "display_attribute": "name",
 }
 
 SUPPLIER_DEFINITION: dict[str, Any] = {
@@ -218,7 +290,8 @@ SUPPLIER_DEFINITION: dict[str, Any] = {
         {"name": "street", "type": "string"},
         {"name": "postal_code", "type": "string", "regex": POSTAL_REGEX},
         {"name": "city", "type": "string"},
-        {"name": "country", "type": "string", "regex": COUNTRY_REGEX},
+        {"name": "country", "type": "reference", "target_model": "Country",
+         "regex": COUNTRY_REGEX, "description": "The country's ISO code — links to Country"},
         {"name": "category", "type": "enum", "enum_values": SUPPLIER_CATEGORIES},
         {"name": "payment_terms", "type": "enum",
          "enum_values": ["net-15", "net-30", "net-45", "net-60"]},
@@ -229,6 +302,7 @@ SUPPLIER_DEFINITION: dict[str, Any] = {
         {"name": "spend_ytd_sek", "type": "number", "min_value": 0},
     ],
     "keys": [{"name": "org_number", "attributes": ["org_number"]}],
+    "display_attribute": "name",
 }
 
 PRODUCT_DEFINITION: dict[str, Any] = {
@@ -246,11 +320,17 @@ PRODUCT_DEFINITION: dict[str, Any] = {
         {"name": "status", "type": "enum",
          "enum_values": ["active", "discontinued", "pre-launch"]},
         {"name": "supplier_number", "type": "string",
-         "description": "The supplying vendor's number — links a product to a Supplier"},
+         "description": "The supplying vendor's number in the ERP"},
+        # The link itself holds the Supplier's BUSINESS key, its registration number: a
+        # reference resolves through the target's business keys, and `supplier_number` is
+        # one system's own number, which no other system shares.
+        {"name": "supplier", "type": "reference", "target_model": "Supplier",
+         "description": "The supplier's registration number — links to Supplier"},
         {"name": "launch_date", "type": "date"},
     ],
     # Each system has its own article number; the GTIN is the one both print on the box.
     "keys": [{"name": "gtin", "attributes": ["gtin"]}],
+    "display_attribute": "name",
 }
 
 
@@ -266,6 +346,9 @@ class SourceSpec:
     name: str
     system_type: str
     key_attribute: str
+    # Formatted with the entity's position (`index`, from 1) and its own values, so a
+    # system that numbers its records (`KU{index:07d}`) and one that keys on a value the
+    # entity already carries (`{code}`) are both one template.
     key_template: str
     coverage: float  # share of the population this system carries
     field_map: dict[str, str] = field(default_factory=dict)
@@ -294,6 +377,9 @@ class ModelSpec:
     description: str
     sources: tuple[SourceSpec, ...]
     defects: tuple[Defect, ...]
+    # `entity` flows through identity resolution and golden resolution; `reference` is a
+    # controlled list such as a code list. Both are ingested and mastered the same way.
+    kind: str = "entity"
     # Probabilistic matching for the records the business key cannot resolve — a system that
     # does not carry the registration number, or a record where it is missing. Blocking is on
     # `city` because the normalizer lowercases and collapses whitespace but does not remove
@@ -319,6 +405,8 @@ CUSTOMER_SOURCES = (
             "Customer_Segment__c": "segment", "Account_Status__c": "status",
             "AnnualRevenue": "annual_revenue_sek", "NumberOfEmployees": "employees",
             "Customer_Since__c": "customer_since",
+            "Parent_Registration_No__c": "parent_customer",
+            "Primary_Contact__c": "primary_contact",
         },
     ),
     SourceSpec(
@@ -333,8 +421,9 @@ CUSTOMER_SOURCES = (
             "TELF1": "phone", "STRAS": "street", "PSTLZ": "postal_code", "ORT01": "city",
             "LAND1": "country", "BRSCH": "industry", "KTOKD": "segment",
             "LOEVM": "status", "UMSA1": "annual_revenue_sek", "ERDAT": "customer_since",
+            "KONZS": "parent_customer",
         },
-        drops=("website", "employees"),
+        drops=("website", "employees", "primary_contact"),
         upper_names=True,
         compact_postal=True,
         phone_style="digits",
@@ -348,7 +437,7 @@ CUSTOMER_SOURCES = (
         # Passthrough: this system already speaks the model's attribute names.
         field_map={},
         drops=("org_number", "vat_number", "industry", "annual_revenue_sek", "employees",
-               "legal_name", "customer_since"),
+               "legal_name", "customer_since", "parent_customer", "primary_contact"),
         strip_legal_form=True,
         phone_style="national",
         noise=0.5,
@@ -407,7 +496,8 @@ PRODUCT_SOURCES = (
             "brand_name": "brand", "product_group": "category", "unit": "uom",
             "ean": "gtin", "price": "list_price", "price_currency": "currency",
             "gross_weight": "weight_kg", "lifecycle": "status",
-            "vendor_number": "supplier_number", "introduced_on": "launch_date",
+            "vendor_number": "supplier_number", "vendor_registration_no": "supplier",
+            "introduced_on": "launch_date",
         },
     ),
     SourceSpec(
@@ -421,12 +511,54 @@ PRODUCT_SOURCES = (
             "EAN11": "gtin", "NETPR": "list_price", "WAERS": "currency",
             "BRGEW": "weight_kg", "MSTAE": "status", "LIFNR": "supplier_number",
         },
-        drops=("description", "brand", "launch_date"),
+        drops=("description", "brand", "launch_date", "supplier"),
         upper_names=True,
     ),
 )
 
+COUNTRY_SOURCES = (
+    SourceSpec(
+        name="iso-countries",
+        system_type="reference-data",
+        key_attribute="code",
+        key_template="{code}",
+        coverage=1.0,
+        # Passthrough: a published code list already speaks the model's names.
+        field_map={},
+        noise=0.0,
+    ),
+    SourceSpec(
+        name="erp-countries",
+        system_type="sap",
+        key_attribute="code",
+        key_template="{code}",
+        coverage=1.0,
+        field_map={"LAND1": "code", "LANDX": "name", "WAERS": "currency"},
+        drops=("region",),
+        upper_names=True,
+        noise=0.0,
+    ),
+)
+
 MODEL_SPECS: dict[str, ModelSpec] = {
+    "country": ModelSpec(
+        name="Country",
+        kind="reference",
+        definition=COUNTRY_DEFINITION,
+        description="Countries — the code list customers and suppliers reference",
+        sources=COUNTRY_SOURCES,
+        # None: a country that quarantines leaves every customer and supplier in it pointing
+        # at nothing, and the demo is about the links, not about a broken code list.
+        defects=(),
+    ),
+    "contact": ModelSpec(
+        name="Contact",
+        definition=CONTACT_DEFINITION,
+        description="Contact people — embedded in a Customer as its primary contact, "
+                    "never delivered on their own",
+        sources=(),
+        defects=(),
+    ),
     "customer": ModelSpec(
         name="Customer",
         definition=CUSTOMER_DEFINITION,
@@ -625,11 +757,84 @@ def make_products(rng: random.Random, count: int) -> list[dict[str, Any]]:
     return entities
 
 
+def make_countries(rng: random.Random, count: int) -> list[dict[str, Any]]:
+    """The code list itself — fixed, whatever the count: a demo references every country its
+    addresses use, and a code list with gaps would leave references pointing at nothing."""
+    return [
+        {"code": code, "name": name, "region": region, "currency": currency}
+        for code, name, region, currency in COUNTRIES
+    ]
+
+
+def make_contacts(rng: random.Random, count: int) -> list[dict[str, Any]]:
+    """Contacts arrive embedded in their Customer (`primary_contact`), never on their own."""
+    return []
+
+
 ENTITY_FACTORIES = {
+    "country": make_countries,
+    "contact": make_contacts,
     "customer": make_customers,
     "supplier": make_suppliers,
     "product": make_products,
 }
+
+# Share of non-enterprise customers that belong to a group — a subsidiary whose parent is
+# one of the enterprise customers. The other two shares are the CRM's coverage of contacts.
+PARENT_SHARE = 0.15
+CONTACT_SHARE = 0.85
+CONTACT_ROLES = ["purchasing", "finance", "logistics", "management"]
+DIAL_CODES = {city: dial for city, _, _, dial in CITIES}
+
+
+def _linker(kind: str, anchor: str) -> random.Random:
+    """A generator for one link decision, seeded by the entity it is about.
+
+    Links draw from their own generators rather than the population's, so adding them left
+    every record a given `--seed` produced before exactly as it was: the same companies, the
+    same drift, the same defects — plus their relationships.
+    """
+    return random.Random(f"{kind}:{anchor}")
+
+
+def link_population(
+    model_key: str, entities: list[dict[str, Any]], population: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Fill in the relationship attributes, which point at OTHER generated entities.
+
+    A reference holds the target's business-key value — a customer's parent by its
+    registration number, a product's supplier by the supplier's — so it resolves to a real
+    record. Customer.country and Supplier.country need nothing here: the ISO code each
+    address already carries is Country's business key.
+    """
+    if model_key == "customer":
+        groups = [e for e in entities if e["segment"] == "enterprise"]
+        for entity in entities:
+            anchor = str(entity["org_number"])
+            if groups and entity["segment"] != "enterprise":
+                pick = _linker("parent", anchor)
+                if pick.random() < PARENT_SHARE:
+                    entity["parent_customer"] = pick.choice(groups)["org_number"]
+            pick = _linker("contact", anchor)
+            if pick.random() < CONTACT_SHARE:
+                first, last = pick.choice(FIRST_NAMES), pick.choice(LAST_NAMES)
+                domain = str(entity["email"]).split("@", 1)[-1]
+                entity["primary_contact"] = {
+                    "name": f"{first} {last}",
+                    "email": f"{_slug(f'{first}.{last}')}@{domain}",
+                    "phone": _phone(pick, DIAL_CODES.get(str(entity["city"]), "+46 8")),
+                    "role": pick.choice(CONTACT_ROLES),
+                }
+    elif model_key == "product":
+        suppliers = population.get("supplier") or []
+        if not suppliers:
+            return  # no suppliers in this run: products carry no supplier link
+        for entity in entities:
+            position = _linker("supplier", str(entity["gtin"])).randrange(len(suppliers))
+            entity["supplier"] = suppliers[position]["org_number"]
+            # The ERP's own number for that supplier — `erp-suppliers` numbers its records
+            # LI0000001, LI0000002, … in population order.
+            entity["supplier_number"] = f"LI{position + 1:07d}"
 
 # --------------------------------------------------------------------------------------
 # Per-source variation. The same entity, as each system actually holds and formats it.
@@ -770,10 +975,18 @@ def build_batches(
     *,
     duplicate_rate: float,
     defect_rate: float,
+    population: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[Batch]:
-    """Generate the population once, then deliver it through every source system."""
+    """Generate the population once, then deliver it through every source system.
+
+    `population` carries the entities already generated in this run, by model key, so a
+    relationship can point at a real one; this model's entities are added to it.
+    """
     model_spec = MODEL_SPECS[model_key]
     entities = ENTITY_FACTORIES[model_key](rng, count)
+    link_population(model_key, entities, population if population is not None else {})
+    if population is not None:
+        population[model_key] = entities
     batches: list[Batch] = []
 
     for spec in model_spec.sources:
@@ -784,10 +997,10 @@ def build_batches(
         for index, entity in enumerate(entities):
             if rng.random() > spec.coverage:
                 continue  # this system simply does not carry this entity
-            key = spec.key_template.format(index=index + 1)
+            key = spec.key_template.format(index=index + 1, **entity)
             values = render(entity, spec, key, rng)
 
-            if rng.random() < defect_rate:
+            if defects and rng.random() < defect_rate:
                 defect = rng.choice(defects)
                 batch.records.append(to_wire(apply_defect(values, defect), spec))
                 batch.defective += 1
@@ -796,8 +1009,9 @@ def build_batches(
                 batch.clean += 1
 
             # The same entity entered twice in the same system under a second key — the
-            # intra-source duplicate Identity Resolution has to catch.
-            if rng.random() < duplicate_rate:
+            # intra-source duplicate Identity Resolution has to catch. A code list has no
+            # second key to enter a country under, so reference models have none.
+            if model_spec.kind == "entity" and rng.random() < duplicate_rate:
                 twin_key = spec.key_template.format(index=900000 + index + 1)
                 twin = render(entity, spec, twin_key, rng)
                 twin = apply_twin_drift(twin, rng)
@@ -1093,7 +1307,11 @@ def check_model_is_ours(model: dict[str, Any], spec: ModelSpec) -> None:
     """
     existing = {a["name"] for a in model.get("definition", {}).get("attributes", [])}
     ours = {a["name"] for a in spec.definition["attributes"]}
-    missing = sorted(ours - existing)
+    # A model that lacks only relationship attributes is one this script created before it
+    # had them; `ensure_model` adds them.
+    links = {a["name"] for a in spec.definition["attributes"]
+             if a["type"] in ("reference", "nested")}
+    missing = sorted(ours - existing - links)
     demanded = sorted(
         a["name"]
         for a in model.get("definition", {}).get("attributes", [])
@@ -1119,24 +1337,92 @@ def _keys_of(definition: dict[str, Any]) -> list[list[str]]:
     return [list(k.get("attributes", [])) for k in definition.get("keys", [])]
 
 
+MODEL_KEYS_BY_NAME = {spec.name: key for key, spec in MODEL_SPECS.items()}
+
+
+def link_targets(spec: ModelSpec) -> list[str]:
+    """The models this model's reference and nested attributes point at, itself excluded."""
+    return [
+        MODEL_KEYS_BY_NAME[a["target_model"]]
+        for a in spec.definition["attributes"]
+        if a["type"] in ("reference", "nested") and a["target_model"] != spec.name
+    ]
+
+
+def bootstrap_order(model_keys: list[str]) -> list[str]:
+    """Every model to create, each after the models it links to.
+
+    A model's links must name models that already exist — the platform refuses a definition
+    whose reference points at nothing — so `--models customer` creates Country and Contact
+    first, even though it generates records for Customer alone.
+    """
+    ordered: list[str] = []
+
+    def visit(key: str) -> None:
+        if key in ordered:
+            return
+        for target in link_targets(MODEL_SPECS[key]):
+            visit(target)
+        ordered.append(key)
+
+    for key in model_keys:
+        visit(key)
+    return ordered
+
+
+def definition_is_current(live: dict[str, Any], spec: ModelSpec) -> bool:
+    """Whether a live definition already says everything this script's definition says.
+
+    Compared field by field on what the script states, because the platform answers with
+    every default filled in. Attributes someone added to the model are allowed.
+    """
+    live_attributes = {a["name"]: a for a in live.get("attributes", [])}
+    for attribute in spec.definition["attributes"]:
+        found = live_attributes.get(attribute["name"])
+        if found is None or any(found.get(k) != v for k, v in attribute.items()):
+            return False
+    return (
+        _keys_of(live) == _keys_of(spec.definition)
+        and live.get("display_attribute") == spec.definition.get("display_attribute")
+    )
+
+
+def current_definition(live: dict[str, Any], spec: ModelSpec) -> dict[str, Any]:
+    """This script's definition, keeping any attribute someone else added to the model."""
+    ours = {a["name"] for a in spec.definition["attributes"]}
+    theirs = [a for a in live.get("attributes", []) if a["name"] not in ours]
+    return {**spec.definition, "attributes": [*spec.definition["attributes"], *theirs]}
+
+
 def ensure_model(client: Client, domain_id: str, spec: ModelSpec) -> dict[str, Any]:
     for listed in client.data_models.list():
         if listed["name"] != spec.name:
             continue
         check_model_is_ours(listed, spec)
-        # Ours, but possibly from an older run of this script. A stale business key is not
-        # cosmetic — it decides whether deterministic resolution has anything to resolve —
-        # so bring the definition up to date. Read first: the write states the revision it
-        # replaces, and a concurrent edit is refused rather than overwritten.
+        # Ours, but possibly from an older run of this script: a stale business key, or a
+        # model from before it had relationships. Neither is cosmetic — the key decides
+        # whether deterministic resolution has anything to resolve, and a missing reference
+        # leaves every relationship view empty — so bring the definition up to date. Read
+        # first: the write states the revision it replaces, and a concurrent edit is
+        # refused rather than overwritten.
         model = client.data_models.get(spec.name)
-        if _keys_of(model["definition"]) != _keys_of(spec.definition):
+        if not definition_is_current(model["definition"], spec):
             model = client.data_models.update(
-                spec.name, definition=spec.definition, if_match=model["version"]
+                spec.name,
+                definition=current_definition(model["definition"], spec),
+                if_match=model["version"],
             )
-            # Changing a business key is a breaking change, and a production Environment
-            # refuses it outright — which is correct: this script is not for production.
-            client.data_models.publish(spec.name, allow_breaking=True)
-            print(f"  updated Data Model '{spec.name}' — business key was stale")
+            # Changing a business key or an attribute's type is a breaking change, and a
+            # production Environment refuses it outright — which is correct: this script is
+            # not for production.
+            try:
+                client.data_models.publish(spec.name, allow_breaking=True)
+            except ApiError as error:
+                raise SystemExit(
+                    f"Data Model '{spec.name}' was updated to this script's definition, but "
+                    f"publishing it was refused — {error}. The change is left as a draft."
+                ) from error
+            print(f"  updated Data Model '{spec.name}' — its definition was stale")
         elif model["status"] == "draft":
             client.data_models.publish(spec.name)
             print(f"  published existing Data Model '{spec.name}'")
@@ -1145,7 +1431,7 @@ def ensure_model(client: Client, domain_id: str, spec: ModelSpec) -> dict[str, A
         spec.name,
         domain=domain_id,
         definition=spec.definition,
-        kind="entity",
+        kind=spec.kind,
         description=spec.description,
         tags=["demo-data"],
     )
@@ -1329,7 +1615,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     shape = parser.add_argument_group("what to generate")
     shape.add_argument("--models", nargs="+", choices=sorted(MODEL_SPECS),
-                       default=["customer", "supplier", "product"])
+                       default=["country", "customer", "supplier", "product"],
+                       help="models to generate records for. The models they link to are "
+                            "created too, so every relationship has a target")
     shape.add_argument("--customers", type=int, default=250, help="distinct customer entities")
     shape.add_argument("--suppliers", type=int, default=60, help="distinct supplier entities")
     shape.add_argument("--products", type=int, default=150, help="distinct product entities")
@@ -1432,17 +1720,35 @@ def connect(args: argparse.Namespace) -> Client:
     return Client(base_url=args.base_url, token=token, environment=environment)
 
 
+# The three models the generator started with draw from one stream, in this order, so a
+# given --seed still produces exactly the records it always did. Models added since draw from
+# a stream of their own and cannot shift those records.
+SHARED_STREAM = ("customer", "supplier", "product")
+
+
 def generate_builtin(args: argparse.Namespace, rng: random.Random) -> list[Batch]:
-    counts = {"customer": args.customers, "supplier": args.suppliers, "product": args.products}
+    counts = {
+        "country": len(COUNTRIES),
+        "contact": 0,
+        "customer": args.customers,
+        "supplier": args.suppliers,
+        "product": args.products,
+    }
     batches: list[Batch] = []
-    for model_key in args.models:
+    population: dict[str, list[dict[str, Any]]] = {}
+    # Declaration order, so a model is generated after the models it links to.
+    for model_key in [key for key in MODEL_SPECS if key in args.models]:
+        model_rng = (
+            rng if model_key in SHARED_STREAM else random.Random(f"{args.seed}:{model_key}")
+        )
         batches.extend(
             build_batches(
                 model_key,
                 counts[model_key],
-                rng,
+                model_rng,
                 duplicate_rate=args.duplicate_rate,
                 defect_rate=args.defect_rate,
+                population=population,
             )
         )
     return batches
@@ -1531,10 +1837,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("bootstrapping configuration:")
                 workspace_id = ensure_workspace(client, args.workspace)
                 domain_id = ensure_domain(client, workspace_id, args.domain)
-                for model_key in args.models:
+                for model_key in bootstrap_order(args.models):
                     model_spec = MODEL_SPECS[model_key]
                     ensure_model(client, domain_id, model_spec)
                     ensure_match_config(client, model_spec)
+                    if model_key not in args.models:
+                        continue  # created as a relationship's target; no records this run
                     for source_spec in model_spec.sources:
                         ensure_source(client, source_spec, model_spec.name)
 
