@@ -326,7 +326,8 @@ without a typed method is reached through `client.request(...)`, which takes the
 
 [`examples/demo_data.py`](examples/README.md) generates realistic demo master data —
 customers, suppliers and products as three source systems would actually deliver them,
-duplicates and defects included — and ingests it into an Environment.
+duplicates and defects included, linked to a Country code list, to each other and to an
+embedded contact — and ingests it into an Environment.
 
 ## Releases
 

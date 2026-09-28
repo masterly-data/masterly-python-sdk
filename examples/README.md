@@ -27,7 +27,7 @@ minting a token and asking which Environments you may use.
 ## What it creates
 
 Against an empty Environment the script is self-sufficient: it creates a Workspace, a
-Domain, three published Data Models, and one Source per originating system. Every step is
+Domain, five published Data Models, and one Source per originating system. Every step is
 find-or-create, so running it twice changes nothing about the configuration.
 
 Find-or-create matches on name, and a name is not proof of identity: an Environment can
@@ -37,15 +37,46 @@ attributes, same target model, same natural key — and stops with an explanatio
 ingesting a batch that would quarantine wholesale. Use a clean Environment, remove the
 stale object, or generate for the existing model on its own terms with `--model`.
 
-| Data Model | Sources | Field names on the wire |
-|---|---|---|
-| Customer | `crm`, `erp`, `webshop` | Salesforce-style, SAP-style, and passthrough |
-| Supplier | `erp-suppliers`, `procurement-portal` | SAP-style and portal-style |
-| Product | `pim`, `erp-products` | PIM-style and SAP-style |
+| Data Model | Kind | Sources | Field names on the wire |
+|---|---|---|---|
+| Country | reference | `iso-countries`, `erp-countries` | passthrough and SAP-style |
+| Contact | entity | none: embedded in a Customer | — |
+| Customer | entity | `crm`, `erp`, `webshop` | Salesforce-style, SAP-style, and passthrough |
+| Supplier | entity | `erp-suppliers`, `procurement-portal` | SAP-style and portal-style |
+| Product | entity | `pim`, `erp-products` | PIM-style and SAP-style |
 
 Each Source carries the field map that conforms its own vocabulary to the model
 (`Account_Name`, `NAME1` and `name` all land in `name`), and declares its natural key.
 `webshop` is deliberately left as passthrough, so both mapping styles are represented.
+
+### Relationships
+
+The models link to each other, so the Relationships tab, the Data explorer's relationship
+columns, a record's related records and the catalog's model map all have something to show.
+A relationship in Masterly is an attribute: a `reference` holds the business-key value of a
+record in its target model, and a `nested` attribute embeds the child record itself.
+
+| From | Attribute | To | What it shows |
+|---|---|---|---|
+| Customer, Supplier | `country` | Country | Many to one, onto a reference model |
+| Product | `supplier` | Supplier | Many to one, between two entity models |
+| Customer | `parent_customer` | Customer | A self-reference: a subsidiary's parent company |
+| Customer | `primary_contact` | Contact | Nested: the contact record, embedded |
+
+Each reference holds a key that exists in the same run: a country's ISO code, a supplier's
+or a parent company's registration number. Every target model names a **display
+attribute** (`name`), so a relationship reads as "Sweden" or "Nordwind Logistik AB" rather
+than as the key.
+
+A model links only to models that exist, so `--models customer` still creates Country and
+Contact, and delivers records to Customer alone. Products link to suppliers only when the
+same run generates suppliers. The links draw from their own random streams, so a `--seed`
+still produces exactly the companies, drift and defects it did before the models had them.
+
+A model created by an earlier run of the script, before it had relationships, is brought up
+to date: the definition is updated, keeping any attribute someone else added, and published.
+Changing `country` from text to a reference is a breaking change, which a production
+Environment refuses, and the run stops there and says so.
 
 ## What makes the data worth ingesting
 
