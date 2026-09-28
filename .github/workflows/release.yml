@@ -75,7 +75,7 @@ jobs:
       # entry poisoned by any earlier job holding this repository's GITHUB_TOKEN would feed the
       # build backend straight into what ships. A cold cache costs seconds here; the wheel is
       # built from the tag alone, with everything fetched fresh from PyPI.
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10, pinned by digest
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10, pinned by digest
         with:
           enable-cache: false
       - run: uv build
