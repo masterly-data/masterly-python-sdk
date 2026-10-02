@@ -84,6 +84,12 @@ def conform(record: dict[str, Any], spec: Any) -> dict[str, Any]:
 
 
 ALL_MODELS = sorted(demo_data.MODEL_SPECS)
+# Models the generator delivers records for. Contact is not one: it arrives embedded in a
+# Customer, so it has a definition and no source of its own.
+DELIVERED = sorted(k for k, s in demo_data.MODEL_SPECS.items() if s.sources)
+# Entity models go through identity resolution, so the rules about shared business keys and
+# match configs are theirs. A reference model is a code list keyed on the code itself.
+ENTITIES = sorted(k for k in DELIVERED if demo_data.MODEL_SPECS[k].kind == "entity")
 
 
 def build(model_key: str, count: int = 40, *, seed: int = 7, defect_rate: float = 0.0) -> list[Any]:
@@ -99,7 +105,7 @@ def build(model_key: str, count: int = 40, *, seed: int = 7, defect_rate: float 
 # --- tests ------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_clean_records_pass_the_models_own_constraints(model_key: str) -> None:
     definition = demo_data.MODEL_SPECS[model_key].definition
     for batch in build(model_key):
@@ -109,7 +115,7 @@ def test_clean_records_pass_the_models_own_constraints(model_key: str) -> None:
             assert not errors, f"{batch.spec.name}: {errors} in {record}"
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_every_defect_actually_breaks_something(model_key: str) -> None:
     """A defect must either violate a constraint or remove the natural key — the two ways
     a record legitimately lands in quarantine."""
@@ -129,7 +135,7 @@ def test_every_defect_actually_breaks_something(model_key: str) -> None:
             )
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_records_speak_the_delivering_systems_field_names(model_key: str) -> None:
     for batch in build(model_key):
         known = set(batch.spec.field_map) or {
@@ -139,7 +145,7 @@ def test_records_speak_the_delivering_systems_field_names(model_key: str) -> Non
             assert set(record) <= known, f"{batch.spec.name} leaked {set(record) - known}"
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_source_keys_are_present_and_unique_within_a_source(model_key: str) -> None:
     for batch in build(model_key):
         conformed = [conform(r, batch.spec) for r in batch.records]
@@ -162,11 +168,13 @@ def test_the_same_entity_reaches_several_systems_under_different_keys() -> None:
     assert sum(b.duplicates for b in batches) > 0, "no intra-source duplicates generated"
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_generation_is_reproducible(model_key: str) -> None:
     first = [b.records for b in build(model_key, defect_rate=0.1)]
     second = [b.records for b in build(model_key, defect_rate=0.1)]
     assert first == second
+    if demo_data.MODEL_SPECS[model_key].kind == "reference":
+        return  # a code list is the same list whatever the seed
     different = [b.records for b in build(model_key, seed=99, defect_rate=0.1)]
     assert first != different
 
@@ -178,7 +186,7 @@ def test_defect_rate_is_honoured() -> None:
     assert 0.15 < defective / total < 0.30
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", ENTITIES)
 def test_adaptive_mode_generates_valid_records_for_a_live_definition(model_key: str) -> None:
     """Adaptive mode reads a model it has never seen. Fed one of our own definitions, the
     records it invents must still satisfy that model."""
@@ -262,7 +270,7 @@ def test_a_model_that_merely_has_extra_attributes_is_still_ours() -> None:
     demo_data.check_model_is_ours(widened, spec)
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", ENTITIES)
 def test_the_business_key_is_never_a_per_system_number(model_key: str) -> None:
     """The bug this guards: keying a model on the number each system assigns mints one
     entity per system, and deterministic resolution has nothing left to resolve. A business
@@ -275,7 +283,7 @@ def test_the_business_key_is_never_a_per_system_number(model_key: str) -> None:
         )
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", DELIVERED)
 def test_the_business_key_is_carried_by_at_least_two_systems(model_key: str) -> None:
     """A shared key only resolves across systems if more than one system delivers it."""
     spec = demo_data.MODEL_SPECS[model_key]
@@ -285,7 +293,7 @@ def test_the_business_key_is_carried_by_at_least_two_systems(model_key: str) -> 
             assert len(carriers) >= 2, f"{spec.name}: only {carriers} carry '{attribute}'"
 
 
-@pytest.mark.parametrize("model_key", ALL_MODELS)
+@pytest.mark.parametrize("model_key", ENTITIES)
 def test_match_config_compares_attributes_the_model_actually_has(model_key: str) -> None:
     spec = demo_data.MODEL_SPECS[model_key]
     attributes = {a["name"] for a in spec.definition["attributes"]}
@@ -399,3 +407,165 @@ def test_source_id_mappings_are_checked(pair: str, expected: str) -> None:
     with pytest.raises(SystemExit, match=expected):
         demo_data.parse_source_ids([pair])
     assert demo_data.parse_source_ids(["crm=src_1"]) == {"crm": "src_1"}
+
+
+# --- relationships -----------------------------------------------------------------------
+
+
+def _generate(models: list[str], **counts: int) -> dict[str, Any]:
+    """The run's clean batches by source name, as `main` would generate them."""
+    args = demo_data.parse_args([
+        "--dry-run", "--defect-rate=0", "--duplicate-rate=0", "--models", *models,
+        *[f"--{name}={value}" for name, value in counts.items()],
+    ])
+    batches = demo_data.generate_builtin(args, random.Random(args.seed))
+    return {b.spec.name: b for b in batches}
+
+
+def _conformed(batch: Any) -> list[dict[str, Any]]:
+    return [conform(r, batch.spec) for r in batch.records]
+
+
+def _links(spec: Any) -> list[dict[str, Any]]:
+    return [a for a in spec.definition["attributes"] if a["type"] in ("reference", "nested")]
+
+
+def test_the_demo_shows_every_kind_of_relationship() -> None:
+    """The reason the models link at all: every Relationships view in a demo used to be empty.
+    A reference onto a reference model, one between entities, a self-reference and a nested
+    child — each is present."""
+    specs = demo_data.MODEL_SPECS
+    kinds = {
+        (spec.name, a["name"]): (a["type"], a["target_model"])
+        for spec in specs.values()
+        for a in _links(spec)
+    }
+    assert kinds[("Customer", "country")] == ("reference", "Country")
+    assert specs["country"].kind == "reference"
+    assert kinds[("Product", "supplier")] == ("reference", "Supplier")
+    assert kinds[("Customer", "parent_customer")] == ("reference", "Customer")
+    assert kinds[("Customer", "primary_contact")] == ("nested", "Contact")
+
+
+@pytest.mark.parametrize("model_key", ALL_MODELS)
+def test_every_link_targets_a_model_the_script_defines(model_key: str) -> None:
+    spec = demo_data.MODEL_SPECS[model_key]
+    names = {s.name for s in demo_data.MODEL_SPECS.values()}
+    for attribute in _links(spec):
+        # A self-reference names the model itself: `"self"` is refused on an attribute today.
+        assert attribute["target_model"] in names, attribute
+        assert attribute["target_model"] != "self"
+
+
+def test_every_model_a_relationship_points_at_names_what_to_show() -> None:
+    """A relationship reads as the target's display attribute. Unset, the explorer shows the
+    key — "SE" rather than "Sweden" — which is what the demo exists to avoid."""
+    by_name = {s.name: s for s in demo_data.MODEL_SPECS.values()}
+    targets = {a["target_model"] for s in by_name.values() for a in _links(s)}
+    for target in targets:
+        definition = by_name[target].definition
+        shown = definition.get("display_attribute")
+        assert shown, f"{target} names no display attribute"
+        attribute = next(a for a in definition["attributes"] if a["name"] == shown)
+        assert attribute["type"] not in ("reference", "nested"), f"{target}.{shown} is a link"
+
+
+def test_bootstrap_creates_every_target_before_the_model_that_links_to_it() -> None:
+    order = demo_data.bootstrap_order(["product", "customer"])
+    assert order.index("country") < order.index("customer")
+    assert order.index("contact") < order.index("customer")
+    assert order.index("supplier") < order.index("product")
+    assert order.index("country") < order.index("supplier")
+    assert len(order) == len(set(order))
+
+
+def test_the_code_list_covers_every_country_an_address_uses() -> None:
+    codes = {code for code, *_ in demo_data.COUNTRIES}
+    assert {country for _, country, _, _ in demo_data.CITIES} <= codes
+    batches = _generate(["country", "customer", "supplier"], customers=60, suppliers=20)
+    for name in ("crm", "erp", "webshop", "erp-suppliers", "procurement-portal"):
+        for record in _conformed(batches[name]):
+            assert record.get("country") in codes | {None}, record
+
+
+def test_a_parent_customer_is_another_customer_of_the_same_run() -> None:
+    batches = _generate(["customer"], customers=120)
+    crm = _conformed(batches["crm"])
+    org_numbers = {r["org_number"] for b in ("crm", "erp") for r in _conformed(batches[b])
+                   if r.get("org_number")}
+    parents = [r for r in crm if r.get("parent_customer")]
+    assert parents, "no subsidiaries generated"
+    for record in parents:
+        assert record["parent_customer"] != record.get("org_number")
+        assert record["parent_customer"] in org_numbers
+    assert not any("parent_customer" in r for r in _conformed(batches["webshop"]))
+
+
+def test_a_primary_contact_is_a_valid_contact_record() -> None:
+    batches = _generate(["customer"], customers=60)
+    contacts = [r["primary_contact"] for r in _conformed(batches["crm"])
+                if r.get("primary_contact")]
+    assert contacts, "the CRM delivered no contacts"
+    for contact in contacts:
+        assert validate(demo_data.CONTACT_DEFINITION, contact) == [], contact
+    assert not any("primary_contact" in r for r in _conformed(batches["erp"]))
+
+
+def test_a_product_references_a_supplier_of_the_same_run() -> None:
+    batches = _generate(["supplier", "product"], suppliers=30, products=40)
+    supplier_keys = {
+        r["org_number"]: r["supplier_number"]
+        for r in _conformed(batches["erp-suppliers"])
+        if r.get("org_number")
+    }
+    linked = [r for r in _conformed(batches["pim"]) if r.get("supplier")]
+    assert linked, "no product carries a supplier"
+    for record in linked:
+        if record["supplier"] in supplier_keys:  # the ERP may not carry that supplier
+            assert record["supplier_number"] == supplier_keys[record["supplier"]]
+    assert sum(r["supplier"] in supplier_keys for r in linked) > len(linked) // 2
+
+
+def test_products_without_suppliers_in_the_run_carry_no_link() -> None:
+    batches = _generate(["product"], products=10)
+    assert not any(r.get("supplier") for r in _conformed(batches["pim"]))
+
+
+def test_adding_the_code_list_to_a_run_changes_no_other_record() -> None:
+    """A seed is a promise: re-running it upserts the same records. Country draws from its own
+    stream, so a run that now includes it delivers the customers it always delivered."""
+    without = _generate(["customer", "supplier"], customers=30, suppliers=10)
+    with_countries = _generate(["country", "customer", "supplier"], customers=30, suppliers=10)
+    for name, batch in without.items():
+        assert with_countries[name].records == batch.records, name
+
+
+def test_a_model_from_before_the_relationships_is_still_ours_and_is_refreshed() -> None:
+    """The demo install's models were created by an earlier run, without links. They must be
+    recognised, found stale, and updated without losing an attribute someone added."""
+    spec = demo_data.MODEL_SPECS["customer"]
+    older = {
+        "attributes": [
+            {**a, "type": "string", "target_model": None} if a["name"] == "country" else a
+            for a in spec.definition["attributes"]
+            if a["name"] not in ("parent_customer", "primary_contact")
+        ]
+        + [{"name": "loyalty_tier", "type": "string"}],
+        "keys": spec.definition["keys"],
+    }
+    demo_data.check_model_is_ours({"definition": older}, spec)  # must not raise
+    assert not demo_data.definition_is_current(older, spec)
+    refreshed = demo_data.current_definition(older, spec)
+    assert demo_data.definition_is_current(refreshed, spec)
+    assert "loyalty_tier" in {a["name"] for a in refreshed["attributes"]}
+
+
+def test_a_current_model_is_left_alone() -> None:
+    spec = demo_data.MODEL_SPECS["product"]
+    served = {
+        **spec.definition,
+        # The platform answers with every default filled in.
+        "attributes": [{"required": False, "classification": "none", **a}
+                       for a in spec.definition["attributes"]],
+    }
+    assert demo_data.definition_is_current(served, spec)
