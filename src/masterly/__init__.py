@@ -6,8 +6,9 @@ and stream channels ride). Built for notebook and pipeline use on Databricks, Mi
 Fabric, and plain Python: sync calls, cursor paging handled for you, optional pandas.
 
 ``client.workspaces``, ``client.domains``, ``client.data_models`` and ``client.sources``
-cover enough configuration to stand an Environment up from a script; ``client.products``
-and ``client.golden`` read out of it.
+cover enough configuration to stand an Environment up from a script, and ``client.config``
+previews and applies the whole of it at once — a pull from Git, an imported file set, a
+promotion from another Environment; ``client.products`` and ``client.golden`` read out of it.
 
 Two token personas connect. :class:`Client` is a signed-in person's session, scoped to the
 Environment it names. :meth:`Client.for_service_account` is a machine: pinned to its own

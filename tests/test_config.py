@@ -246,3 +246,127 @@ def test_an_unknown_name_says_which_kind_of_thing_is_missing(
     api = getattr(_client(handler), attribute)
     with pytest.raises(LookupError, match=f"no {kind} named 'nope'"):
         api._resolve("nope")
+
+
+# --- the bundle applies: a preview's version is the revision the apply states ---------------
+
+
+def _bundle_handler(seen: dict[str, Any]) -> Any:
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"], seen["method"] = request.url.path, request.method
+        seen["body"] = __import__("json").loads(request.content)
+        seen["if_match"] = request.headers.get("if-match")
+        dry_run = seen["body"].get("dry_run")
+        return httpx.Response(
+            200,
+            json={
+                "dry_run": dry_run,
+                "diff": {
+                    "workspaces": {
+                        "created": ["Sales"],
+                        "updated": [],
+                        "removed": [],
+                        "unchanged": 0,
+                    }
+                },
+                "snapshot_id": None if dry_run else "cs_1",
+                "version": "7.abc" if dry_run else "8.abc",
+            },
+        )
+
+    return handler
+
+
+def test_a_pull_without_a_precondition_is_the_preview_and_states_none() -> None:
+    seen: dict[str, Any] = {}
+    preview = _client(_bundle_handler(seen)).config.pull(ref="staging")
+    assert (seen["method"], seen["path"]) == ("POST", "/v1/config:pull")
+    assert seen["body"] == {"dry_run": True, "ref": "staging"}
+    assert seen["if_match"] is None
+    assert preview["version"] == "7.abc"
+
+
+def test_a_pull_with_the_previews_version_applies_and_states_it() -> None:
+    seen: dict[str, Any] = {}
+    client = _client(_bundle_handler(seen))
+    preview = client.config.pull()
+    applied = client.config.pull(if_match=preview["version"])
+    assert seen["body"] == {"dry_run": False}
+    assert seen["if_match"] == '"7.abc"'  # the bare token, quoted for the wire, never parsed
+    assert applied["snapshot_id"] == "cs_1"
+
+
+def test_an_import_sends_the_files_as_a_set_and_the_preview_version_on_apply() -> None:
+    seen: dict[str, Any] = {}
+    client = _client(_bundle_handler(seen))
+    files = {"workspaces/sales.yaml": "name: Sales\n"}
+    preview = client.config.import_files(files)
+    assert seen["body"] == {
+        "files": [{"path": "workspaces/sales.yaml", "content": "name: Sales\n"}],
+        "dry_run": True,
+    }
+    client.config.import_files(files, if_match=preview["version"])
+    assert (seen["path"], seen["body"]["dry_run"], seen["if_match"]) == (
+        "/v1/config:import",
+        False,
+        '"7.abc"',
+    )
+
+
+def test_a_promotion_is_addressed_to_the_target_and_names_the_source() -> None:
+    seen: dict[str, Any] = {}
+    client = _client(_bundle_handler(seen))
+    preview = client.config.promote("env_prod", source="env_stage")
+    assert seen["path"] == "/v1/environments/env_prod/config:promote-from"
+    assert seen["body"] == {"source_environment_id": "env_stage", "dry_run": True}
+    client.config.promote("env_prod", source="env_stage", if_match=preview["version"])
+    assert (seen["body"]["dry_run"], seen["if_match"]) == (False, '"7.abc"')
+
+
+def test_a_stale_bundle_apply_surfaces_the_conflict() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["if-match"] == '"7.abc"'
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "VERSION_CONFLICT",
+                    "message": "This environment-config moved to version 9.abc.",
+                    "details": {
+                        "object_type": "environment-config",
+                        "object_id": "env_test",
+                        "base_version": "7.abc",
+                        "current_version": "9.abc",
+                        "changed_by": "maria@example.com",
+                        "changed_fields": ["workspace/ws_1"],
+                        "undisclosed_changes": 0,
+                        "changed_fields_complete": True,
+                    },
+                }
+            },
+        )
+
+    with pytest.raises(ApiError) as refused:
+        _client(handler).config.pull(if_match="7.abc")
+    conflict = refused.value.conflict
+    assert conflict is not None
+    assert conflict.object_type == "environment-config"
+    assert conflict.changed_fields == ("workspace/ws_1",)
+    assert conflict.may_auto_merge is True
+
+
+def test_the_unconditional_precondition_is_a_spelled_overwrite() -> None:
+    seen: dict[str, Any] = {}
+    _client(_bundle_handler(seen)).config.pull(if_match=Precondition.unconditional())
+    assert (seen["body"]["dry_run"], seen["if_match"]) == (False, "*")
+
+
+def test_configuration_is_a_session_route() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("refused before the wire")
+
+    machine = Client.for_service_account(
+        "https://masterly.test", "tok", transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(PermissionError, match="session token"):
+        machine.config.pull()
