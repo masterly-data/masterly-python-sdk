@@ -32,6 +32,8 @@ _FILES: dict[str, str] = {
     "data-models/account.yaml": (
         "# The account master — keep the keys in sync with the CRM extract.\n"
         "definition:\n"
+        "  description: The legal entity we invoice, as the CRM extract names it, one row per"
+        " registered company number and trading country.\n"
         "  attributes:\n"
         "  - name: account_number\n"
         "    type: string\n"
@@ -41,7 +43,7 @@ _FILES: dict[str, str] = {
         "    historized: true\n"
         "  - name: 'segment'\n"
         "    type: enum\n"
-        '    values: ["SMB", "Enterprise"]\n'
+        '    values: ["SMB", "Mid-market", "Enterprise", "Public sector", "Strategic", "Partner"]\n'
         "  keys:\n"
         "  - attributes: [account_number]\n"
         "    name: business\n"
@@ -96,7 +98,8 @@ _FILES: dict[str, str] = {
     ),
     "pipelines/nightly-master-refresh.yaml": (
         "name: Nightly master refresh\n"
-        "description: Resolve, score and refresh the supplier directory every night.\n"
+        "description: Resolve, score and refresh the supplier directory every night, then scan"
+        " it, so the morning extract carries a fresh score.\n"
         "definition:\n"
         "  triggers:\n"
         "    cron: 0 2 * * *\n"
@@ -107,7 +110,8 @@ _FILES: dict[str, str] = {
         "    - id: scan-suppliers\n"
         "      kind: dq.scan\n"
         "      params: {model: Supplier}\n"
-        "      depends_on: [resolve-suppliers]\n"
+        "      depends_on: [resolve-suppliers, resolve-customers, resolve-products,"
+        " resolve-sites]\n"
     ),
     "rules/match/account.yaml": (
         "config:\n  rules:\n  - attributes: [account_number]\n    kind: exact\nmodel: Account\n"
@@ -222,6 +226,10 @@ def test_migrate_produces_a_reviewable_diff_over_a_multi_file_repo(
     the terminal shows is what the commit will show."""
     root = _write_repo(tmp_path)
     before = {path: (root / path).read_text() for path in _FILES}
+    # Lines over 80 characters (a description, a flow sequence) in the files a step rewrites:
+    # the dump must not re-wrap them, or the diff carries lines no step edited.
+    for path in ("data-models/account.yaml", "pipelines/nightly-master-refresh.yaml"):
+        assert sum(len(line) > 80 for line in before[path].splitlines()) == 2, path
 
     assert main(["config", "migrate", str(root)]) == 0
     out = capsys.readouterr().out

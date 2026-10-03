@@ -171,6 +171,10 @@ def _load_yaml() -> Any:
         ) from exc
     yaml = YAML()
     yaml.preserve_quotes = True
+    # ruamel folds any line past `width` (default 80) when it dumps, so a long description or
+    # flow sequence the migration never touched would come back re-wrapped and show in the
+    # diff. Effectively unbounded: a line is emitted as wide as it was read.
+    yaml.width = 1 << 20
     return yaml
 
 
