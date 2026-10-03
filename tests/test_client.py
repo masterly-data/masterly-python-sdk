@@ -676,3 +676,28 @@ def test_a_session_connection_may_name_no_environment() -> None:
     assert client.persona == "session"
     assert client.environment is None
     assert "x-masterly-environment" not in seen[-1].headers
+
+
+def test_a_source_is_created_and_relabelled_by_its_display_name() -> None:
+    """The name is the Source's fixed identity; the display name is the label, sent only when
+    given — so an older server that has no such field is never sent one."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = json.loads(request.content) if request.content else {}
+        return httpx.Response(200, json={"source_id": "src_1", **body})
+
+    client = _client(handler)
+    client.sources.create("crm", target_model="Customer", source_key="customer_number")
+    assert "display_name" not in json.loads(seen[-1].content)
+
+    client.sources.create(
+        "crm", target_model="Customer", source_key="customer_number", display_name="Salesforce CRM"
+    )
+    assert json.loads(seen[-1].content)["display_name"] == "Salesforce CRM"
+
+    client.sources.update("src_1", display_name="CRM", if_match=2)
+    assert seen[-1].method == "PATCH"
+    assert seen[-1].headers["if-match"] == '"2"'
+    assert json.loads(seen[-1].content) == {"display_name": "CRM"}
