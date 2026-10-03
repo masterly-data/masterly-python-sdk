@@ -359,8 +359,8 @@ without a typed method is reached through `client.request(...)`, which takes the
 
 The configuration files in a GitOps repository follow a schema that Masterly versions. A
 change within a version is additive — an old repository keeps validating. A removal or a
-rename is announced first: the linter (`config:lint`, which the in-product editor and a pull
-run) warns on the old shape, naming what replaces it and the date after which it stops
+rename is announced first: the linter (`config:lint`, which the in-product editor runs as you
+edit) warns on the old shape, naming what replaces it and the date after which it stops
 validating, and `masterly config migrate` makes the edit, as a diff you review and commit
 rather than one you author.
 
