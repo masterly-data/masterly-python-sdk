@@ -355,6 +355,32 @@ A refused write raises `ApiError`; `error.conflict` names the fields that moved.
 without a typed method is reached through `client.request(...)`, which takes the same
 `if_match`.
 
+## Command line: `masterly config migrate`
+
+The configuration files in a GitOps repository follow a schema that Masterly versions. A
+change within a version is additive — an old repository keeps validating. A removal or a
+rename is announced first: the linter (`config:lint`, which the in-product editor runs as you
+edit) warns on the old shape, naming what replaces it and the date after which it stops
+validating, and `masterly config migrate` makes the edit, as a diff you review and commit
+rather than one you author.
+
+```bash
+pip install 'masterly[cli]'            # the command and the YAML round-trip parser it needs
+
+cd my-masterly-config                  # the repository root
+masterly config migrate                # rewrite to the newest schema version; print the diff
+masterly config migrate --dry-run      # print the diff, write nothing
+masterly config migrate --check        # exit 1 when a migration is pending — for CI
+```
+
+The repository's schema version is declared in `masterly.yaml` at its root
+(`schema_version: 1`); a repository from before that file existed is on version 1, and the
+first run adds the file. Only the files a migration step changes are rewritten, keeping their
+comments, key order, quoting and indentation; what a step cannot do mechanically — a value
+that could belong in more than one place — is listed under the diff for you to place by hand.
+Nothing is committed: review the diff, then commit it. The warning's trailing id, such as
+`(data_models.attribute.historized)`, names the migration step that performs the change.
+
 ## Examples
 
 [`examples/demo_data.py`](examples/README.md) generates realistic demo master data —

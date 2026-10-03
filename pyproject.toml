@@ -37,9 +37,18 @@ Changelog = "https://masterlydata.com/docs/whats-new/"
 
 [project.optional-dependencies]
 pandas = ["pandas>=2.0"]
+# The command line (`masterly config migrate`). An extra rather than a dependency so the base
+# package stays the two-dependency client a notebook imports; what the extra adds is the YAML
+# round-trip parser the migration needs to rewrite a file without disturbing its comments,
+# key order and quoting. The console script below is installed either way and says to install
+# the extra when it is missing.
+cli = ["ruamel.yaml>=0.18"]
+
+[project.scripts]
+masterly = "masterly.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "pandas>=2.0"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11", "pandas>=2.0", "ruamel.yaml>=0.18"]
 
 [build-system]
 requires = ["hatchling"]
