@@ -280,15 +280,20 @@ def test_a_failed_batch_abandons_the_load_and_never_completes_it() -> None:
         _ = load.report
 
 
+def _read_next_frame() -> list[dict[str, Any]]:
+    """Stands in for the caller's own code failing part-way through a snapshot."""
+    raise KeyError("the next frame could not be read")
+
+
 def test_an_error_in_the_callers_own_code_abandons_the_load_too() -> None:
     server = _LoadServer()
 
-    with (
-        pytest.raises(KeyError),
-        _client(server).sources.full_load("src_1", batch_size=5000) as load,
-    ):
-        load.send(_records(10))
-        raise KeyError("the next frame could not be read")
+    # pytest.raises stays OUTSIDE the load, so the error passes through the load's exit — the
+    # path under test — before it is caught.
+    with pytest.raises(KeyError):
+        with _client(server).sources.full_load("src_1", batch_size=5000) as load:
+            load.send(_records(10))
+            load.send(_read_next_frame())
 
     assert server.calls()[-1] == "POST /v1/sources/src_1/loads/load_1:abandon"
     assert not any(call.endswith(":complete") for call in server.calls())
