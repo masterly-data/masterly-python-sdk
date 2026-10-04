@@ -49,8 +49,8 @@ def _type_ok(attribute: dict[str, Any], value: Any) -> bool:
             return True
         case "enum":
             return value in (attribute.get("enum_values") or [])
-        case _:
-            return True
+    # Types the server does not check structurally (reference, nested, …) always pass.
+    return True
 
 
 def validate(definition: dict[str, Any], record: dict[str, Any]) -> list[str]:

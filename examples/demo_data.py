@@ -1101,8 +1101,8 @@ def adaptive_value(
             return _past_date(rng, 6)
         case "code":
             return f"DEMO-{index:06d}"
-        case _:
-            return f"{stem} {qualifier}"
+    # No hint matched the attribute's name: a company-shaped string is a plausible default.
+    return f"{stem} {qualifier}"
 
 
 def unique_key_value(attribute: dict[str, Any], index: int) -> tuple[str, bool]:
@@ -1216,6 +1216,8 @@ def _post(base_url: str, path: str, payload: dict[str, Any], token: str | None =
             envelope = response.json().get("error", {})
             code, message = envelope.get("code", code), envelope.get("message", message)
         except ValueError:
+            # The body is not JSON (a proxy's HTML error page, say), so there is no error
+            # envelope to read; the status code and the raw text set above are reported.
             pass
         raise SystemExit(f"POST {path} failed — {code} ({response.status_code}): {message}")
     return response.json()
@@ -1251,11 +1253,8 @@ def login(base_url: str, email: str, organization: str | None) -> str:
 def resolve_environment(base_url: str, token: str, requested: str | None) -> str:
     """The Environment to connect to. `/v1/environments` is Organization-scoped, so it is
     answered before an Environment is chosen — which is why it is not on the client."""
-    client = Client(base_url=base_url, token=token, environment="")
-    try:
+    with Client(base_url=base_url, token=token, environment="") as client:
         page = client.request("GET", "/v1/environments", params={"limit": 200})
-    finally:
-        client.close()
     environments = page.get("items", [])
     known = {e["environment_id"] for e in environments}
     if requested:
