@@ -15,6 +15,8 @@ instead, with the remedy in the message.
 from __future__ import annotations
 
 import contextlib
+import time
+import uuid
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -23,6 +25,7 @@ import httpx
 from masterly._config import ConfigApi, DataModelsApi, DomainsApi, WorkspacesApi
 from masterly._extract import GoldenApi, ProductsApi
 from masterly._ingest import SourcesApi
+from masterly._jobs import JobsApi
 from masterly._precondition import (
     OBJECT_REMOVED,
     VERSION_CONFLICT,
@@ -34,6 +37,10 @@ from masterly._precondition import coerce as _coerce_precondition
 _TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 _IF_MATCH = "If-Match"
 _IF_NONE_MATCH = "If-None-Match"
+_IDEMPOTENCY_KEY = "Idempotency-Key"
+#: Seconds to wait before each re-send of a keyed write whose connection failed. Two re-sends,
+#: so a write is attempted at most three times before the connection error is raised.
+_KEYED_RETRY_BACKOFF: tuple[float, ...] = (0.5, 2.0)
 
 Persona = Literal["session", "service-account"]
 
@@ -119,6 +126,7 @@ class Client:
         self.domains = DomainsApi(self)
         self.data_models = DataModelsApi(self)
         self.config = ConfigApi(self)
+        self.jobs = JobsApi(self)
 
     @classmethod
     def for_service_account(
@@ -273,6 +281,31 @@ class Client:
         if if_none_match:
             sent[_IF_NONE_MATCH] = "*"
         response = self._http.request(method, path, params=params, json=json, headers=sent or None)
+        return self._answer(response)
+
+    def _keyed_request(self, method: str, path: str, *, json: Any) -> Any:
+        """Send a write the server de-duplicates by ``Idempotency-Key``, retrying it with the
+        same key when the connection fails before an answer arrives.
+
+        A connection that drops after the server accepted the write but before its answer
+        reached us is indistinguishable, here, from one that never got through. Re-sending with
+        the same key makes that ambiguity harmless: the server replays the answer it already
+        gave instead of applying the write a second time. An answer — any status — is never
+        retried; it raises or returns as usual.
+        """
+        headers = {_IDEMPOTENCY_KEY: str(uuid.uuid4())}
+        for backoff in (*_KEYED_RETRY_BACKOFF, None):
+            try:
+                response = self._http.request(method, path, json=json, headers=headers)
+            except httpx.TransportError:
+                if backoff is None:
+                    raise
+                time.sleep(backoff)
+                continue
+            return self._answer(response)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    def _answer(self, response: httpx.Response) -> Any:
         if response.status_code >= 400:
             code, message = "HTTP_ERROR", response.text[:500]
             details: Any = None

@@ -15,7 +15,7 @@ client = Client(
 
 # Ingest: deliver records to a Source, by name or id (chunked automatically)
 report = client.sources.ingest("crm", records)
-print(report.records, "records in", report.batches, "batches")
+print(report.records, "records in", report.batches, "batches:", report.job_ids)
 ```
 
 ```python
@@ -170,13 +170,13 @@ the account. Either way it goes in the `token` argument above.
 | A Source the `ingest` scope does not name | `ApiError`, 403 `SERVICE_ACCOUNT_SCOPE_DENIED` |
 | An `environment=` the account is not pinned to | `ApiError`, 403 `SERVICE_ACCOUNT_SCOPE_DENIED` |
 | The account was revoked, or is unknown | `ApiError`, 401 `SERVICE_ACCOUNT_INVALID` |
-| A session route — a listing, configuration, golden records, a Source's counters | `ApiError`, 401 `UNAUTHENTICATED` |
+| A session route — a listing, configuration, golden records, a Source's counters, a job | `ApiError`, 401 `UNAUTHENTICATED` |
 | A Source or product addressed by name | `PermissionError`, before anything is sent |
 
 Scopes are fixed when the account is created. Widening one is not a permission someone grants
 after the fact — it is a new account, and the old one is revoked.
 
-## Deletes, full snapshots and record history
+## Deletes, full snapshots, receipts and record history
 
 A record upserts by its source key. To delete one instead, send its key with `"op": "delete"`
 in the same batch as everything else:
@@ -199,10 +199,55 @@ record of the Source that the snapshot does not carry is deleted after the upser
 client.sources.ingest("crm", every_customer, mode="full", batch_size=5000)
 ```
 
-The platform reconciles each call on its own, so a full snapshot travels as one call, and the
-client refuses one that does not fit `batch_size` before it sends anything. The install caps
-how many records one call may carry (5,000 unless it set its own); over that cap the call is
-refused with `INGEST_BATCH_TOO_LARGE`, and nothing is deleted.
+The platform reconciles each call on its own, so `ingest(mode="full")` sends the snapshot as
+one call, and refuses one that does not fit `batch_size` before it sends anything. The install
+caps how many records one call may carry (5,000 unless it set its own); over that cap the call
+is refused with `INGEST_BATCH_TOO_LARGE`, and nothing is deleted.
+
+A snapshot larger than one call goes as a **full load**: one load on the Source, any number of
+batches in it, and the deletes happen once, when the load completes, over everything its
+batches carried. Send it all at once or a piece at a time, as your pipeline produces it:
+
+```python
+with client.sources.full_load("crm", batch_size=5000) as load:
+    for frame in snapshot_frames:
+        load.send(frame)                     # chunked into batches of batch_size
+
+done = client.sources.wait_for_load("crm", load.load_id)
+print(done["status"], done["reconciled"], "records deleted")
+```
+
+Leaving the block normally completes the load. If anything raises inside it — a refused
+batch, a dropped connection, your own code — the load is **abandoned** and the error is raised:
+a snapshot that did not arrive whole never reconciles, so nothing is deleted, and what the sent
+batches upserted stays. A Source takes one load at a time; opening a second while one is open
+raises `ApiError` `INGEST_LOAD_IN_FLIGHT`, with the open load's id in `details`.
+
+### Following a batch to its outcome
+
+Ingest is accepted asynchronously, and every batch is answered with the job that will apply it.
+The report keeps each batch's receipt, in the order the batches were sent:
+
+```python
+report = client.sources.ingest("crm", records, batch_size=5000)
+for receipt in report.receipts:
+    print(receipt.job_id, receipt.records)
+
+job = client.jobs.wait(report.job_ids[-1], timeout=300)   # returns on succeeded or failed
+if job["status"] == "failed":
+    print(job["error"]["code"], job["error"]["message"])
+```
+
+`client.jobs.get(job_id)` reads a job once; `client.jobs.wait` reads it until it has
+`succeeded` or `failed` and raises `TimeoutError` if it has not within `timeout` seconds. Reading
+a job is a session route today: on a service-account connection the server refuses it, and the
+refusal is raised as `ApiError`.
+
+Every batch, and the opening of a full load, is sent with an `Idempotency-Key`. When the
+connection fails before an answer arrives, the client re-sends it with the same key, and the
+platform replays its first answer instead of applying the batch twice or opening a second load.
+
+### Record history
 
 Every state a record has been in, newest first, and the undo for a delete (both session routes;
 `record_id` is the record's `rec_…` id, not its source key):

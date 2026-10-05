@@ -9,6 +9,7 @@ Fabric, and plain Python: sync calls, cursor paging handled for you, optional pa
 cover enough configuration to stand an Environment up from a script, and ``client.config``
 previews and applies the whole of it at once — a pull from Git, an imported file set, a
 promotion from another Environment; ``client.products`` and ``client.golden`` read out of it.
+``client.jobs`` follows the asynchronous work an ingest batch or a full load starts.
 
 Two token personas connect. :class:`Client` is a signed-in person's session, scoped to the
 Environment it names. :meth:`Client.for_service_account` is a machine: pinned to its own
@@ -19,17 +20,19 @@ personas" says how to get either one.
 
 from masterly._client import ApiError, Client, Persona
 from masterly._extract import ChangeFeed, RowPages
-from masterly._ingest import IngestMode, IngestReport
+from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport
 from masterly._precondition import Conflict, Precondition
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "ApiError",
     "ChangeFeed",
     "Client",
     "Conflict",
+    "FullLoad",
     "IngestMode",
+    "IngestReceipt",
     "IngestReport",
     "Persona",
     "Precondition",
