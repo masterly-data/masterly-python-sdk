@@ -404,6 +404,45 @@ A refused write raises `ApiError`; `error.conflict` names the fields that moved.
 without a typed method is reached through `client.request(...)`, which takes the same
 `if_match`.
 
+### Deactivate, reactivate or delete a source
+
+A source has a `status`: `active`, or `inactive` once deactivated. An **inactive** source admits
+nothing — a pushed batch, a CSV upload, a full load's next batch, a pull and a quarantine retry
+are all refused with `409 SOURCE_INACTIVE` and nothing is queued; its pull schedule is
+suspended. Everything it already landed stays, and **its records keep contributing to golden
+records**: nothing is recomputed, in either direction. Reactivating admits records again with
+nothing lost. Both are governed writes, so they take the source's `version` as `if_match`:
+
+```python
+source = client.sources.get("erp")
+client.sources.deactivate("erp", if_match=source["version"])   # status: "inactive"
+
+source = client.sources.get("erp")
+client.sources.reactivate("erp", if_match=source["version"])   # status: "active"
+```
+
+A **delete** removes the source and everything it landed — its records in every target and
+their history, quarantine, profile, drift, run history, schedule and sealed connection — and
+recomputes the golden records it contributed to without it; an entity left with no live
+record clears. It is heavy work, so it runs as a job: the source is marked `deleting` at once,
+the answer is the job receipt, and `client.jobs.wait` follows the removal to its end. Read
+what it would touch first, and ask a person to type the source's `name` before you send it:
+
+```python
+impact = client.sources.deletion_impact("erp")
+print(impact["targets"], impact["golden"]["would_change"], impact["golden"]["would_clear"])
+if impact["deletable"] and typed_name == impact["name"]:
+    source = client.sources.get("erp")
+    receipt = client.sources.delete("erp", if_match=source["version"])
+    client.jobs.wait(receipt["job_id"])
+```
+
+The delete is refused with `409 SOURCE_IN_USE` while a data product reads the source through a
+raw relation — `error.details["dependents"]` names each one; change or delete the product
+first — and the model's built-in manual source can be neither deactivated nor deleted
+(`409 SOURCE_BUILT_IN`). The four calls are session routes. They talk to routes that are not
+in a published release yet; an install on an earlier release answers them `404 NOT_FOUND`.
+
 ## Command line: `masterly config migrate`
 
 The configuration files in a GitOps repository follow a schema that Masterly versions. A
