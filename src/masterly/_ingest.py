@@ -10,6 +10,11 @@ the model's attribute names, and the source key that says which attributes form 
 record's stable natural key. The key is what makes re-delivery an upsert instead of a
 duplicate — a source registered without one quarantines every record it is ever handed,
 which is why :meth:`SourcesApi.create` will not let you leave it out.
+
+A Source also has a lifecycle. :meth:`SourcesApi.deactivate` stops it admitting records and
+keeps everything it landed, still counting toward golden records, until
+:meth:`SourcesApi.reactivate`; :meth:`SourcesApi.delete` removes it and everything it landed
+as a job, after :meth:`SourcesApi.deletion_impact` has said what that would touch.
 """
 
 from __future__ import annotations
@@ -86,7 +91,11 @@ class SourcesApi:
         return all_items(self._client, "/v1/sources")
 
     def get(self, source: str) -> dict[str, Any]:
-        """One Source by id or name, with its mapping, drift and pull state."""
+        """One Source by id or name, with its mapping, drift and pull state.
+
+        ``status`` is the Source's lifecycle: ``active``, or ``inactive`` after
+        :meth:`deactivate`. ``version`` is the revision to state on the next governed write.
+        """
         got: dict[str, Any] = self._client._request("GET", f"/v1/sources/{self._resolve(source)}")
         return got
 
@@ -182,6 +191,96 @@ class SourcesApi:
             "GET", f"/v1/sources/{self._resolve(source)}/stats"
         )
         return stats
+
+    # --- lifecycle: deactivate, reactivate, delete --------------------------------------
+
+    def deactivate(
+        self, source: str, *, if_match: Precondition | str | int | None = None
+    ) -> dict[str, Any]:
+        """Stop a Source admitting records, keeping everything it has landed.
+
+        An inactive Source refuses every way in — a pushed batch, a CSV upload, MCP, a full
+        load's next batch (opening or completing one too), a pull and a quarantine retry —
+        with :class:`~masterly.ApiError` code ``SOURCE_INACTIVE``, and queues nothing; its
+        pull schedule is suspended and delivery monitoring stops raising incidents for it.
+        Batches accepted before the deactivation still complete, and a load left open can
+        still be abandoned. Its records, history, quarantine and runs all stay, and **its
+        records keep contributing to golden records** — nothing is recomputed, in either
+        direction. :meth:`reactivate` undoes it with nothing lost.
+
+        ``if_match`` is the ``version`` of the Source you read, sent as ``If-Match`` — a
+        governed write (ADR 0070), as :meth:`update` is. A Source that is already inactive
+        answers with its current view and changes nothing, before the precondition is
+        checked, so a retry of a deactivation that landed is absorbed. The model's built-in
+        manual source is refused with code ``SOURCE_BUILT_IN``. Returns the Source, with
+        ``status`` ``inactive``. Needs the ``source:update`` permission; session persona.
+        """
+        deactivated: dict[str, Any] = self._client._request(
+            "POST", f"/v1/sources/{self._resolve(source)}:deactivate", if_match=if_match
+        )
+        return deactivated
+
+    def reactivate(
+        self, source: str, *, if_match: Precondition | str | int | None = None
+    ) -> dict[str, Any]:
+        """Let a deactivated Source admit records again.
+
+        Every channel accepts it from now; a pull schedule resumes with a fresh window (no
+        catch-up) and delivery monitoring measures lateness from now. Nothing is recomputed.
+        ``if_match`` is the ``version`` you read, as on :meth:`deactivate`; a Source that is
+        already active answers with its current view and changes nothing. Returns the Source,
+        with ``status`` ``active``. Needs the ``source:update`` permission; session persona.
+        """
+        reactivated: dict[str, Any] = self._client._request(
+            "POST", f"/v1/sources/{self._resolve(source)}:reactivate", if_match=if_match
+        )
+        return reactivated
+
+    def deletion_impact(self, source: str) -> dict[str, Any]:
+        """What :meth:`delete` would remove and touch — read it before you delete.
+
+        Per target, the live ``records``, ``tombstoned`` records and open ``quarantined``
+        rows that go; ``golden.would_change`` and ``golden.would_clear``, the entities whose
+        golden record is recomputed without the Source and the ones left with no live record;
+        the ``open_tasks`` and ``open_incidents`` the delete closes; the
+        ``service_account_scopes`` it is removed from; and ``dependents``, the data products
+        that read the Source through a raw relation — while any exists ``deletable`` is false
+        and the delete is refused. ``name`` is what a confirming client asks the user to type
+        back. Takes the delete's permission, ``source:delete``; session persona.
+        """
+        impact: dict[str, Any] = self._client._request(
+            "GET", f"/v1/sources/{self._resolve(source)}/deletion-impact"
+        )
+        return impact
+
+    def delete(
+        self, source: str, *, if_match: Precondition | str | int | None = None
+    ) -> dict[str, Any]:
+        """Delete a Source and everything it landed, as a job.
+
+        Gone with it: its records in every target and their history, its quarantine rows,
+        profile, drift, run history, schedule and sealed connection. The entities it
+        contributed to have their golden records **recomputed without it**, and one left with
+        no live record clears. Its open tasks and delivery incidents close with the reason
+        ``source-deleted``, and every service-account ``ingest`` scope naming it is edited.
+        Read :meth:`deletion_impact` first; a client that asks a person to confirm asks them
+        to type the Source's ``name``.
+
+        Heavy work, so the answer is the job receipt (``{"job_id": ...}``): the Source is
+        marked ``deleting`` at once — it admits nothing and is absent from every read — and
+        :meth:`~masterly.Client.jobs.wait` follows the removal to its end. Refused with
+        :class:`~masterly.ApiError` code ``SOURCE_IN_USE`` while a data product reads the
+        Source through a raw relation (``details["dependents"]`` names each one — change or
+        delete the product first), and with ``SOURCE_BUILT_IN`` for the model's built-in
+        manual source. ``if_match`` is the ``version`` you read, as on :meth:`update`; a
+        Source already being deleted answers the pending job's receipt and writes nothing,
+        before the precondition is checked. Its ``name`` can be used again once the job has
+        run. Needs the ``source:delete`` permission; session persona.
+        """
+        accepted: dict[str, Any] = self._client._request(
+            "POST", f"/v1/sources/{self._resolve(source)}:delete", if_match=if_match
+        )
+        return accepted
 
     def _resolve(self, source: str) -> str:
         """Accept a source id (``src_…``) or its exact name (a name costs a listing, which is
