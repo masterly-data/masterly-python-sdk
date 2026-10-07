@@ -505,7 +505,8 @@ def test_an_empty_target_is_removed_under_its_revision_and_a_full_one_is_refused
         )
 
     client = _client(handler)
-    assert client.sources.targets.remove("src_1", "Address", if_match=4) is None
+    removed = client.sources.targets.remove("src_1", "Address", if_match=4)
+    assert removed is None, "a 204 answers nothing"
     assert (seen[0].method, seen[0].url.path) == ("DELETE", "/v1/sources/src_1/targets/Address")
     assert seen[0].headers["if-match"] == '"4"'
 
