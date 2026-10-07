@@ -283,7 +283,16 @@ class Client:
         response = self._http.request(method, path, params=params, json=json, headers=sent or None)
         return self._answer(response)
 
-    def _keyed_request(self, method: str, path: str, *, json: Any) -> Any:
+    def _keyed_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> Any:
         """Send a write the server de-duplicates by ``Idempotency-Key``, retrying it with the
         same key when the connection fails before an answer arrives.
 
@@ -291,12 +300,15 @@ class Client:
         reached us is indistinguishable, here, from one that never got through. Re-sending with
         the same key makes that ambiguity harmless: the server replays the answer it already
         gave instead of applying the write a second time. An answer — any status — is never
-        retried; it raises or returns as usual.
+        retried; it raises or returns as usual. The body is ``json``, or raw ``content`` (a
+        CSV file) with its own ``Content-Type`` in ``headers``.
         """
-        headers = {_IDEMPOTENCY_KEY: str(uuid.uuid4())}
+        sent = {**(headers or {}), _IDEMPOTENCY_KEY: str(uuid.uuid4())}
         for backoff in (*_KEYED_RETRY_BACKOFF, None):
             try:
-                response = self._http.request(method, path, json=json, headers=headers)
+                response = self._http.request(
+                    method, path, params=params, json=json, content=content, headers=sent
+                )
             except httpx.TransportError:
                 if backoff is None:
                     raise
