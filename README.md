@@ -193,7 +193,9 @@ recomputes without it, and its history stays readable. A delete for a key the so
 hold does nothing.
 
 When a system can only hand over everything it has, send it as a **full snapshot**: every live
-record of the Source that the snapshot does not carry is deleted after the upserts.
+record of the target that the snapshot does not carry is deleted after the upserts (a source
+that [feeds several models](#a-source-that-feeds-several-models) names the target with
+`model=`; its other targets are untouched).
 
 ```python
 client.sources.ingest("crm", every_customer, mode="full", batch_size=5000)
@@ -387,6 +389,71 @@ client.sources.update("erp", display_name="SAP ERP (Sweden)", if_match=source["v
 Everything takes an id or an exact name, so a script reads the way the domain is discussed.
 A model's `definition` carries its attributes, keys and constraints — ingest validates every
 record against them, so widening or tightening one changes what the pipeline accepts.
+
+### A source that feeds several models
+
+A source feeds one or more models — its **targets** — and each target has its own source
+key and field map. A CRM export that carries customers and their addresses is one source
+with two targets, registered with `targets=` instead of `target_model=`:
+
+```python
+from masterly import SourceTarget
+
+client.sources.create(
+    "crm",
+    display_name="Salesforce CRM",
+    targets=[
+        SourceTarget("Customer", source_key="customer_number"),
+        SourceTarget("Address", source_key="address_id", field_map={"ADDR_ID": "address_id"}),
+    ],
+)
+```
+
+A batch lands in **one** target, so a push to such a source names it with `model=` — one call
+per model. On a source with one target `model` may be left out, and the call sends exactly
+what it always sent; on a source with several, an unnamed batch is refused with
+`SOURCE_TARGET_REQUIRED` before anything is queued, `error.details["targets"]` listing them:
+
+```python
+client.sources.ingest("crm", customers, model="Customer")
+client.sources.ingest("crm", addresses, model="Address")
+client.sources.upload_csv("crm", open("addresses.csv").read(), model="Address", delimiter=";")
+
+with client.sources.full_load("crm", model="Address") as load:   # one target's snapshot
+    load.send(every_address)
+```
+
+Records, quarantine and counts are per target too — a source key names one record within a
+target, so the same key under two targets is two records:
+
+```python
+for row in client.sources.quarantine("crm", model="Address", status="open"):
+    print(row["model_name"], row["reason_code"], row["payload"])
+
+stats = client.sources.stats("crm")           # the whole source, plus `targets[]` per model
+stats = client.sources.stats("crm", model="Address")
+```
+
+`client.sources.targets` lists, adds, reads, edits and removes a source's targets. A target
+has a revision of its own, stated on its governed writes; adding one needs a model with a
+published version, and only a target that holds no records — deleted ones included — can be
+removed, never the last one:
+
+```python
+client.sources.targets.add("crm", "Address", source_key="address_id")
+target = client.sources.targets.get("crm", "Address")
+target["mapping"]["field_map"]["STREET"] = "street"
+client.sources.targets.update("crm", "Address", mapping=target["mapping"], if_match=target["version"])
+client.sources.targets.remove("crm", "Address", if_match=target["version"])   # only while empty
+```
+
+On what `client.sources.get` returns, `targets[]` carries every target; the top-level
+`target_model`, `mapping`, `connector`, `pull_state`, `profile` and `drift` are **deprecated**
+and describe the first target — on a one-target source, exactly what they always did. The
+same goes for `target_model=` and `mapping=` on `client.sources.update`, which write the first
+target; edit any target through `client.sources.targets.update`. These calls talk to routes
+that are not in a published release of the API yet; an install on an earlier release answers
+them `404 NOT_FOUND`, and sends every batch to its one target.
 
 Editing a model or a source is a **governed write**: more than one person edits them, and the
 edit is derived from a read, so `update` states the revision it replaces (ADR 0070) and a stale
