@@ -448,12 +448,12 @@ client.sources.targets.remove("crm", "Address", if_match=target["version"])   # 
 ```
 
 On what `client.sources.get` returns, `targets[]` carries every target; the top-level
-`target_model`, `mapping`, `connector`, `pull_state`, `profile` and `drift` are **deprecated**
-and describe the first target — on a one-target source, exactly what they always did. The
-same goes for `target_model=` and `mapping=` on `client.sources.update`, which write the first
-target; edit any target through `client.sources.targets.update`. These calls talk to routes
-that are not in a published release of the API yet; an install on an earlier release answers
-them `404 NOT_FOUND`, and sends every batch to its one target.
+`target_model`, `mapping`, `profile` and `drift` are **deprecated** and describe the first
+target — on a one-target source, exactly what they always did. The same goes for `target_model=`
+and `mapping=` on `client.sources.update`, which write the first target; edit any target through
+`client.sources.targets.update`. These calls talk to routes that are not in a published release
+of the API yet; an install on an earlier release answers them `404 NOT_FOUND`, and sends every
+batch to its one target.
 
 Editing a model or a source is a **governed write**: more than one person edits them, and the
 edit is derived from a read, so `update` states the revision it replaces (ADR 0070) and a stale
@@ -474,11 +474,11 @@ without a typed method is reached through `client.request(...)`, which takes the
 ### Deactivate, reactivate or delete a source
 
 A source has a `status`: `active`, or `inactive` once deactivated. An **inactive** source admits
-nothing — a pushed batch, a CSV upload, a full load's next batch, a pull and a quarantine retry
-are all refused with `409 SOURCE_INACTIVE` and nothing is queued; its pull schedule is
-suspended. Everything it already landed stays, and **its records keep contributing to golden
-records**: nothing is recomputed, in either direction. Reactivating admits records again with
-nothing lost. Both are governed writes, so they take the source's `version` as `if_match`:
+nothing — a pushed batch, a CSV upload, a full load's next batch and a quarantine retry are all
+refused with `409 SOURCE_INACTIVE` and nothing is queued. Everything it already landed stays,
+and **its records keep contributing to golden records**: nothing is recomputed, in either
+direction. Reactivating admits records again with nothing lost. Both are governed writes, so
+they take the source's `version` as `if_match`:
 
 ```python
 source = client.sources.get("erp")
