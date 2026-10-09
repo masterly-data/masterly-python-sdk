@@ -148,11 +148,10 @@ class SourcesApi:
         """One Source by id or name, with its targets, status and revision.
 
         ``targets`` lists the data models the Source feeds, in creation order, each with its
-        own ``mapping``, ``connector``, ``pull_state``, ``profile`` and ``drift``
-        (:attr:`targets` reads and edits them). The top-level ``target_model``, ``mapping``,
-        ``connector``, ``pull_state``, ``profile`` and ``drift`` are deprecated and describe
-        the FIRST target — on a Source with one target, exactly what they always described.
-        ``status`` is the Source's lifecycle: ``active``, or ``inactive`` after
+        own ``mapping``, ``profile`` and ``drift`` (:attr:`targets` reads and edits them).
+        The top-level ``target_model``, ``mapping``, ``profile`` and ``drift`` are deprecated
+        and describe the FIRST target — on a Source with one target, exactly what they always
+        described. ``status`` is the Source's lifecycle: ``active``, or ``inactive`` after
         :meth:`deactivate`. ``version`` is the revision to state on the next governed write.
         """
         got: dict[str, Any] = self._client._request("GET", f"/v1/sources/{self._resolve(source)}")
@@ -312,13 +311,13 @@ class SourcesApi:
         """Stop a Source admitting records, keeping everything it has landed.
 
         An inactive Source refuses every way in — a pushed batch, a CSV upload, MCP, a full
-        load's next batch (opening or completing one too), a pull and a quarantine retry —
-        with :class:`~masterly.ApiError` code ``SOURCE_INACTIVE``, and queues nothing; its
-        pull schedule is suspended and delivery monitoring stops raising incidents for it.
-        Batches accepted before the deactivation still complete, and a load left open can
-        still be abandoned. Its records, history, quarantine and runs all stay, and **its
-        records keep contributing to golden records** — nothing is recomputed, in either
-        direction. :meth:`reactivate` undoes it with nothing lost.
+        load's next batch (opening or completing one too) and a quarantine retry — with
+        :class:`~masterly.ApiError` code ``SOURCE_INACTIVE``, and queues nothing; delivery
+        monitoring stops raising incidents for it. Batches accepted before the deactivation
+        still complete, and a load left open can still be abandoned. Its records, history,
+        quarantine and runs all stay, and **its records keep contributing to golden records** —
+        nothing is recomputed, in either direction. :meth:`reactivate` undoes it with nothing
+        lost.
 
         ``if_match`` is the ``version`` of the Source you read, sent as ``If-Match`` — a
         governed write (ADR 0070), as :meth:`update` is. A Source that is already inactive
@@ -337,11 +336,11 @@ class SourcesApi:
     ) -> dict[str, Any]:
         """Let a deactivated Source admit records again.
 
-        Every channel accepts it from now; a pull schedule resumes with a fresh window (no
-        catch-up) and delivery monitoring measures lateness from now. Nothing is recomputed.
-        ``if_match`` is the ``version`` you read, as on :meth:`deactivate`; a Source that is
-        already active answers with its current view and changes nothing. Returns the Source,
-        with ``status`` ``active``. Needs the ``source:update`` permission; session persona.
+        Every channel accepts it from now, and delivery monitoring measures lateness from now.
+        Nothing is recomputed. ``if_match`` is the ``version`` you read, as on
+        :meth:`deactivate`; a Source that is already active answers with its current view and
+        changes nothing. Returns the Source, with ``status`` ``active``. Needs the
+        ``source:update`` permission; session persona.
         """
         reactivated: dict[str, Any] = self._client._request(
             "POST", f"/v1/sources/{self._resolve(source)}:reactivate", if_match=if_match
@@ -659,11 +658,10 @@ class SourceTargetsApi:
     """The data models a Source feeds — ``client.sources.targets``.
 
     A target is one model plus everything specific to it: its ``mapping`` (field map, source
-    key, code translations), and for a pull source the connector that reads it with its pull
-    state, and what the pipeline produced for it — the latest-batch ``profile`` and the
-    ``drift`` finding. Records, quarantine rows, stats and loads are per target too: a source
-    key names one record within a target, so the same key under two targets is two records.
-    Each target has a revision of its own (``version``), stated on :meth:`update` and
+    key, code translations) and what the pipeline produced for it — the latest-batch ``profile``
+    and the ``drift`` finding. Records, quarantine rows, stats and loads are per target too: a
+    source key names one record within a target, so the same key under two targets is two
+    records. Each target has a revision of its own (``version``), stated on :meth:`update` and
     :meth:`remove`; every target write also moves the Source's. Session persona.
     """
 
@@ -705,10 +703,8 @@ class SourceTargetsApi:
         ``MODEL_NOT_PUBLISHED``) and must not be fed by the Source yet
         (``SOURCE_TARGET_EXISTS``); a ``field_map`` target or ``source_key`` attribute the
         model's published version does not declare is refused with
-        ``MAPPING_ATTRIBUTE_UNKNOWN``. The new target holds no records. For a pull source, its
-        connector is configured afterwards with ``PUT /v1/sources/{id}/connector?model_name=``
-        through :meth:`~masterly.Client.request`. The Source's revision moves: read the
-        Source again before its next governed write. Returns the target.
+        ``MAPPING_ATTRIBUTE_UNKNOWN``. The new target holds no records. The Source's revision
+        moves: read the Source again before its next governed write. Returns the target.
         """
         body = {
             "model_name": model,

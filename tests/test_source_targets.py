@@ -35,8 +35,6 @@ def _target(model: str, key: str, version: int = 1, **mapping: Any) -> dict[str,
     return {
         "model_name": model,
         "mapping": {"field_map": {}, "source_key": [key], **mapping},
-        "connector": None,
-        "pull_state": None,
         "profile": None,
         "drift": None,
         "created_at": "2026-10-07T09:00:00Z",
