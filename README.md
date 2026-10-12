@@ -386,6 +386,15 @@ source = client.sources.get("erp")
 client.sources.update("erp", display_name="SAP ERP (Sweden)", if_match=source["version"])
 ```
 
+A field the field map does not name passes through under its own name, so a field named like a
+model attribute lands on it. When such a field is not meant for the model, name it in
+`ignored_fields=` (on `create`, `SourceTarget` and `targets.add`): it is dropped before the field
+map, lands on no attribute and is not reported as schema drift. It comes back as
+`mapping["ignored_fields"]`; to change it later, edit the mapping you read and pass it to
+`update` (or `targets.update`). An install on an API release before this field existed drops
+`ignored_fields` without an error and returns no such key, so read the mapping back to confirm it
+was kept.
+
 Everything takes an id or an exact name, so a script reads the way the domain is discussed.
 A model's `definition` carries its attributes, keys and constraints — ingest validates every
 record against them, so widening or tightening one changes what the pipeline accepts.

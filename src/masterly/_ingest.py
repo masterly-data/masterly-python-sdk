@@ -90,7 +90,9 @@ class SourceTarget:
     the field map has been applied — required, because a target without one quarantines
     everything delivered into it. ``field_map`` maps this system's own field names to the
     model's attribute names (``{"NAME1": "name"}``); leave it out when the system already
-    speaks the model's names. ``translations`` are the target's code translations, in the
+    speaks the model's names. ``ignored_fields`` names this system's fields to drop before
+    the field map: they land on no attribute, not even one of their own name, and are not
+    reported as schema drift. ``translations`` are the target's code translations, in the
     shape the platform stores them, for a target registered with them from the start.
     """
 
@@ -98,13 +100,16 @@ class SourceTarget:
     source_key: str | Sequence[str] = field(hash=False)
     field_map: Mapping[str, str] | None = field(default=None, hash=False)
     translations: Mapping[str, Any] | None = field(default=None, hash=False)
+    ignored_fields: Sequence[str] | None = field(default=None, hash=False)
 
     def _spec(self) -> dict[str, Any]:
         if not self.model_name:
             raise ValueError("a target names the model it feeds")
         return {
             "model_name": self.model_name,
-            "mapping": _mapping(self.source_key, self.field_map, self.translations),
+            "mapping": _mapping(
+                self.source_key, self.field_map, self.translations, self.ignored_fields
+            ),
         }
 
 
@@ -112,11 +117,17 @@ def _mapping(
     source_key: str | Sequence[str],
     field_map: Mapping[str, str] | None,
     translations: Mapping[str, Any] | None = None,
+    ignored_fields: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     key = [source_key] if isinstance(source_key, str) else list(source_key)
     if not key:
         raise ValueError("source_key names the attribute(s) forming the record's natural key")
     mapping: dict[str, Any] = {"field_map": dict(field_map or {}), "source_key": key}
+    if ignored_fields is not None:
+        if isinstance(ignored_fields, str):
+            # A bare string is a sequence of characters; sent as-is it would ignore "N", "A"...
+            raise TypeError("ignored_fields is a list of field names, e.g. ['NAME2']")
+        mapping["ignored_fields"] = list(ignored_fields)
     if translations is not None:
         mapping["translations"] = dict(translations)
     return mapping
@@ -149,9 +160,12 @@ class SourcesApi:
 
         ``targets`` lists the data models the Source feeds, in creation order, each with its
         own ``mapping``, ``profile`` and ``drift`` (:attr:`targets` reads and edits them).
-        The top-level ``target_model``, ``mapping``, ``profile`` and ``drift`` are deprecated
-        and describe the FIRST target — on a Source with one target, exactly what they always
-        described. ``status`` is the Source's lifecycle: ``active``, or ``inactive`` after
+        A ``mapping`` carries ``field_map``, ``source_key``, ``ignored_fields`` and
+        ``translations``; a server on an API release before ``ignored_fields`` existed leaves
+        that key out, so read it with ``mapping.get("ignored_fields", [])``. The top-level
+        ``target_model``, ``mapping``, ``profile`` and ``drift`` are deprecated and describe
+        the FIRST target — on a Source with one target, exactly what they always described.
+        ``status`` is the Source's lifecycle: ``active``, or ``inactive`` after
         :meth:`deactivate`. ``version`` is the revision to state on the next governed write.
         """
         got: dict[str, Any] = self._client._request("GET", f"/v1/sources/{self._resolve(source)}")
@@ -164,6 +178,7 @@ class SourcesApi:
         target_model: str | None = None,
         source_key: str | Sequence[str] | None = None,
         field_map: Mapping[str, str] | None = None,
+        ignored_fields: Sequence[str] | None = None,
         targets: Sequence[SourceTarget] | None = None,
         system_type: str = "rest",
         mode: str = "push",
@@ -181,8 +196,11 @@ class SourcesApi:
         — required, because a source without one quarantines everything it delivers — and
         ``field_map`` maps this system's own field names to the model's attribute names
         (``{"NAME1": "name"}``); leave it out when the system already speaks the model's names
-        and every field passes through untouched. This form sends ``target_model`` and
-        ``mapping`` exactly as it always has.
+        and every field passes through untouched. ``ignored_fields`` names this system's
+        fields to drop before the field map — a field the model has an attribute of the same
+        name for, but which is not meant for it, lands on nothing; a field cannot be both
+        ignored and mapped (``422``). This form sends ``target_model`` and ``mapping`` exactly
+        as it always has; ``ignored_fields`` is sent in the mapping only when passed.
 
         **Several models.** Pass ``targets`` instead: one :class:`SourceTarget` per model the
         system holds, each with its own key and field map — a CRM export that carries
@@ -194,10 +212,15 @@ class SourcesApi:
         """
         body: dict[str, Any] = {"name": name, "system_type": system_type, "mode": mode}
         if targets is not None:
-            if target_model is not None or source_key is not None or field_map is not None:
+            if (
+                target_model is not None
+                or source_key is not None
+                or field_map is not None
+                or ignored_fields is not None
+            ):
                 raise ValueError(
                     "pass either targets= (one SourceTarget per model) or target_model= with "
-                    "source_key= and field_map= — not both"
+                    "source_key=, field_map= and ignored_fields= — not both"
                 )
             if not targets:
                 raise ValueError("a Source feeds at least one model — targets is empty")
@@ -208,7 +231,7 @@ class SourcesApi:
                     "a Source names what it feeds: target_model= with source_key=, or targets="
                 )
             body["target_model"] = target_model
-            body["mapping"] = _mapping(source_key, field_map)
+            body["mapping"] = _mapping(source_key, field_map, ignored_fields=ignored_fields)
         if display_name is not None:
             body["display_name"] = display_name
         created: dict[str, Any] = self._client._request("POST", "/v1/sources", json=body)
@@ -239,7 +262,8 @@ class SourcesApi:
 
         ``mapping`` REPLACES the mapping document, so pass the one you read from
         :meth:`get` with your edit applied — assembling a partial drops whatever else it
-        held, such as code translations. ``target_model`` and ``mapping`` here write the
+        held, such as code translations or ``ignored_fields`` — to ignore one more field, append
+        it to the read mapping's ``ignored_fields``. ``target_model`` and ``mapping`` here write the
         Source's FIRST target and are deprecated: on a Source with several targets, edit any
         target's mapping with :meth:`SourceTargetsApi.update` instead. Both are still sent
         only when passed.
@@ -658,11 +682,12 @@ class SourceTargetsApi:
     """The data models a Source feeds — ``client.sources.targets``.
 
     A target is one model plus everything specific to it: its ``mapping`` (field map, source
-    key, code translations) and what the pipeline produced for it — the latest-batch ``profile``
-    and the ``drift`` finding. Records, quarantine rows, stats and loads are per target too: a
-    source key names one record within a target, so the same key under two targets is two
-    records. Each target has a revision of its own (``version``), stated on :meth:`update` and
-    :meth:`remove`; every target write also moves the Source's. Session persona.
+    key, ignored fields, code translations) and what the pipeline produced for it — the
+    latest-batch ``profile`` and the ``drift`` finding. Records, quarantine rows, stats and
+    loads are per target too: a source key names one record within a target, so the same key
+    under two targets is two records. Each target has a revision of its own (``version``),
+    stated on :meth:`update` and :meth:`remove`; every target write also moves the Source's.
+    Session persona.
     """
 
     def __init__(self, sources: SourcesApi) -> None:
@@ -694,9 +719,10 @@ class SourceTargetsApi:
         source_key: str | Sequence[str],
         field_map: Mapping[str, str] | None = None,
         translations: Mapping[str, Any] | None = None,
+        ignored_fields: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        """Add a target: one more model the Source feeds, with the field map, source key and
-        code translations deliveries to it are read through — the same three
+        """Add a target: one more model the Source feeds, with the field map, source key, code
+        translations and ignored fields deliveries to it are read through — the same four
         :class:`SourceTarget` takes.
 
         The model must have a published version (:class:`~masterly.ApiError` code
@@ -708,7 +734,7 @@ class SourceTargetsApi:
         """
         body = {
             "model_name": model,
-            "mapping": _mapping(source_key, field_map, translations),
+            "mapping": _mapping(source_key, field_map, translations, ignored_fields),
         }
         added: dict[str, Any] = self._client._request(
             "POST", f"/v1/sources/{self._sources._resolve(source)}/targets", json=body
