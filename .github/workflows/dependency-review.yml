@@ -32,7 +32,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # Third-party, so pinned by full commit SHA (zizmor unpinned-uses).
+      # Pinned by full commit SHA: MAS-2159 asks for it, which is stricter than the `actions/*`
+      # ref-pin policy in .github/zizmor.yml.
       - uses: actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c  # v4.3.4, pinned by digest
         with:
           fail-on-severity: high

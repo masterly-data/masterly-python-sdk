@@ -2,7 +2,7 @@
 #
 # Source: the permissive licences that can be combined with this package's own Apache-2.0
 # licence and redistributed from PyPI -- Apache-2.0 itself, and the permissive families
-# (MIT, BSD, ISC, PSF, Unlicense/CC0, MPL-2.0 as file-level copyleft that does not reach the
+# (MIT, BSD, ISC, PSF, Zlib, Unlicense/CC0, MPL-2.0 as file-level copyleft that does not reach the
 # SDK's own code). Strong or network copyleft (GPL, AGPL, LGPL-3 static) and non-commercial or
 # source-available licences are deliberately absent: a dependency under one fails the check.
 # Identifiers are SPDX. Adding one is an owner decision.
@@ -18,5 +18,6 @@ allow-licenses:
   - Python-2.0
   - Unlicense
   - CC0-1.0
+  - Zlib
   - MPL-2.0
   - BlueOak-1.0.0
