@@ -1,0 +1,40 @@
+# Fails a pull request that introduces a dependency with a known high-or-worse advisory, or one
+# whose licence is outside .github/dependency-review-config.yml (MAS-2155 is the backend twin).
+# This package ships to PyPI, so what it depends on reaches customers' environments.
+#
+# The required-status-check name for the ruleset is the job name: `dependency-review`. Adding it
+# to the ruleset is the owner's change.
+name: dependency-review
+
+# Quoted because bare `on` is a YAML 1.1 boolean.
+"on":
+  pull_request:
+  # The merge queue tests the speculative merge. Without this trigger a required check never
+  # reports for a queued entry and the queue stalls until it times out.
+  merge_group:
+
+# Deliberately no path filter. A required check that does not run on a pull request blocks it
+# forever; with no dependency change the action reports an empty diff and exits 0 in seconds.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # actions/checkout, and the dependency-graph compare API
+    steps:
+      # persist-credentials: false -- nothing here pushes, so the token has no job after the checkout.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Third-party, so pinned by full commit SHA (zizmor unpinned-uses).
+      - uses: actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c  # v4.3.4, pinned by digest
+        with:
+          fail-on-severity: high
+          config-file: ./.github/dependency-review-config.yml
+          comment-summary-in-pr: never
