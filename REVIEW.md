@@ -4,7 +4,7 @@
 
 ## What blocks
 
-- **The card's criteria are not met.** Check the change against the stated acceptance
+- **The change's stated acceptance criteria are not met.** Check the change against the stated acceptance
   criteria, not against what the diff happens to do.
 - **A public API break without a major version.** Removed or renamed names in `__all__`
   (`src/masterly/__init__.py`), changed signatures or defaults, a new required argument, a

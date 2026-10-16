@@ -35,7 +35,7 @@ release-record check. A change is gated on all of it.
 
 - Semver. The version is set in two places that must agree: `pyproject.toml` (`version`)
   and `src/masterly/__init__.py` (`__version__`, sent in the `User-Agent` header).
-- The SDK's version tracks the `/v1` contract and is independent of the application's.
+- The SDK's version tracks the `/v1` contract and is independent of the application's (ADR 0068).
 - A release is a version-bump PR to `main`, then an annotated `vX.Y.Z` tag on the merged
   commit. Pushing the tag starts `.github/workflows/release.yml`, which publishes to PyPI by
   trusted publishing (OIDC, no tokens) through the `pypi` environment.
