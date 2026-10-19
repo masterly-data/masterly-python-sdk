@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
       # Pinned by full commit SHA: MAS-2159 asks for it, which is stricter than the `actions/*`
       # ref-pin policy in .github/zizmor.yml.
-      - uses: actions/dependency-review-action@5a2ce3f5b92ee19cbb1541a4984c76d921601d7c  # v4.3.4, pinned by digest
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294  # v5.0.0, pinned by digest
         with:
           fail-on-severity: high
           config-file: ./.github/dependency-review-config.yml
