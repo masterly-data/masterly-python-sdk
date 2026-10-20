@@ -318,7 +318,7 @@ def test_a_pull_without_a_precondition_is_the_preview_and_states_none() -> None:
     seen: dict[str, Any] = {}
     preview = _client(_bundle_handler(seen)).config.pull(ref="staging")
     assert (seen["method"], seen["path"]) == ("POST", "/v1/config:pull")
-    assert seen["body"] == {"dry_run": True, "ref": "staging"}
+    assert seen["body"] == {"dry_run": True, "allow_breaking": False, "ref": "staging"}
     assert seen["if_match"] is None
     assert preview["version"] == "7.abc"
 
@@ -328,7 +328,7 @@ def test_a_pull_with_the_previews_version_applies_and_states_it() -> None:
     client = _client(_bundle_handler(seen))
     preview = client.config.pull()
     applied = client.config.pull(if_match=preview["version"])
-    assert seen["body"] == {"dry_run": False}
+    assert seen["body"] == {"dry_run": False, "allow_breaking": False}
     assert seen["if_match"] == '"7.abc"'  # the bare token, quoted for the wire, never parsed
     assert applied["snapshot_id"] == "cs_1"
 
@@ -341,6 +341,7 @@ def test_an_import_sends_the_files_as_a_set_and_the_preview_version_on_apply() -
     assert seen["body"] == {
         "files": [{"path": "workspaces/sales.yaml", "content": "name: Sales\n"}],
         "dry_run": True,
+        "allow_breaking": False,
     }
     client.config.import_files(files, if_match=preview["version"])
     assert (seen["path"], seen["body"]["dry_run"], seen["if_match"]) == (
@@ -355,7 +356,11 @@ def test_a_promotion_is_addressed_to_the_target_and_names_the_source() -> None:
     client = _client(_bundle_handler(seen))
     preview = client.config.promote("env_prod", source="env_stage")
     assert seen["path"] == "/v1/environments/env_prod/config:promote-from"
-    assert seen["body"] == {"source_environment_id": "env_stage", "dry_run": True}
+    assert seen["body"] == {
+        "source_environment_id": "env_stage",
+        "dry_run": True,
+        "allow_breaking": False,
+    }
     client.config.promote("env_prod", source="env_stage", if_match=preview["version"])
     assert (seen["body"]["dry_run"], seen["if_match"]) == (False, '"7.abc"')
 
@@ -390,6 +395,84 @@ def test_a_stale_bundle_apply_surfaces_the_conflict() -> None:
     assert conflict.object_type == "environment-config"
     assert conflict.changed_fields == ("workspace/ws_1",)
     assert conflict.may_auto_merge is True
+
+
+_FILES = {"workspaces/sales.yaml": "name: Sales\n"}
+_BUNDLE_CALLS: list[tuple[str, Any, dict[str, Any]]] = [
+    ("pull", lambda c, **kw: c.config.pull(**kw), {}),
+    (
+        "import",
+        lambda c, **kw: c.config.import_files(_FILES, **kw),
+        {"files": [{"path": "workspaces/sales.yaml", "content": "name: Sales\n"}]},
+    ),
+    (
+        "promote",
+        lambda c, **kw: c.config.promote("env_prod", source="env_stage", **kw),
+        {"source_environment_id": "env_stage"},
+    ),
+]
+
+
+_ALL_BUNDLE_CALLS = pytest.mark.parametrize(
+    ("name", "call", "extra"), _BUNDLE_CALLS, ids=[c[0] for c in _BUNDLE_CALLS]
+)
+
+
+@_ALL_BUNDLE_CALLS
+def test_cfg_fr_033_the_default_sends_allow_breaking_false(
+    name: str, call: Any, extra: dict[str, Any]
+) -> None:
+    seen: dict[str, Any] = {}
+    client = _client(_bundle_handler(seen))
+    call(client)
+    assert seen["body"] == {**extra, "dry_run": True, "allow_breaking": False}
+    call(client, if_match="7.abc")
+    assert seen["body"] == {**extra, "dry_run": False, "allow_breaking": False}
+
+
+@_ALL_BUNDLE_CALLS
+def test_dmm_fr_082_allow_breaking_is_sent_on_preview_and_apply(
+    name: str, call: Any, extra: dict[str, Any]
+) -> None:
+    seen: dict[str, Any] = {}
+    client = _client(_bundle_handler(seen))
+    call(client, allow_breaking=True)
+    assert seen["body"] == {**extra, "dry_run": True, "allow_breaking": True}
+    assert seen["if_match"] is None
+    call(client, if_match="7.abc", allow_breaking=True)
+    assert seen["body"] == {**extra, "dry_run": False, "allow_breaking": True}
+    assert seen["if_match"] == '"7.abc"'
+
+
+def test_dmm_fr_082_a_refused_breaking_apply_exposes_the_breaking_changes() -> None:
+    changes = [{"model": "Customer", "changes": [{"kind": "attribute_removed", "path": "email"}]}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409,
+            json={
+                "error": {
+                    "code": "BREAKING_CHANGE_NOT_ACKNOWLEDGED",
+                    "message": "Breaking changes need acknowledgement.",
+                    "details": {"errors": [], "breaking_changes": changes},
+                }
+            },
+        )
+
+    with pytest.raises(ApiError) as refused:
+        _client(handler).config.promote("env_prod", source="env_stage", if_match="7.abc")
+    assert refused.value.breaking_changes == changes
+    assert refused.value.details["breaking_changes"] == changes
+    assert refused.value.conflict is None
+
+
+def test_breaking_changes_is_none_without_the_list_or_off_a_409() -> None:
+    version_conflict = ApiError(409, "VERSION_CONFLICT", "moved", {"base_version": "1"})
+    assert version_conflict.breaking_changes is None
+    assert version_conflict.conflict is not None
+    not_a_conflict = ApiError(400, "BAD", "no", {"breaking_changes": [{"model": "X"}]})
+    assert not_a_conflict.breaking_changes is None
+    assert ApiError(409, "OTHER", "no").breaking_changes is None
 
 
 def test_the_unconditional_precondition_is_a_spelled_overwrite() -> None:

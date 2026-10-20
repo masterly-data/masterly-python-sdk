@@ -237,6 +237,11 @@ class ConfigApi:
     to overwrite whatever is there says so with ``Precondition.unconditional()``, which the
     audit trail records as an unconditional write.
 
+    **A breaking change needs an acknowledgement.** An apply into a production Environment whose
+    models carry a breaking change is refused unless it passes ``allow_breaking=True``. The
+    preview lists the breaking changes first, so review them there; the refusal is a 409 that
+    :attr:`~masterly.ApiError.breaking_changes` names. The SDK never sets the flag for you.
+
     Session routes: a service-account connection cannot reach configuration.
     """
 
@@ -248,6 +253,7 @@ class ConfigApi:
         *,
         ref: str | None = None,
         if_match: Precondition | str | int | None = None,
+        allow_breaking: bool = False,
     ) -> dict[str, Any]:
         """Pull configuration from the Environment's bound Git repository (GitOps mode).
 
@@ -255,8 +261,12 @@ class ConfigApi:
         default) against the current configuration, and the ``version`` to apply it with.
         With ``if_match`` — the preview's ``version`` — it applies, and is refused with 409
         ``VERSION_CONFLICT`` if the configuration here or the branch head moved since.
+
+        A breaking model change applied into a production Environment needs
+        ``allow_breaking=True``; the preview lists the breaking changes first. Without it the
+        apply is refused with a 409 whose :attr:`~masterly.ApiError.breaking_changes` names them.
         """
-        body: dict[str, Any] = {"dry_run": if_match is None}
+        body: dict[str, Any] = {"dry_run": if_match is None, "allow_breaking": allow_breaking}
         if ref is not None:
             body["ref"] = ref
         return self._apply("POST", "/v1/config:pull", body, if_match)
@@ -266,6 +276,7 @@ class ConfigApi:
         files: Mapping[str, str],
         *,
         if_match: Precondition | str | int | None = None,
+        allow_breaking: bool = False,
     ) -> dict[str, Any]:
         """Import a configuration file set — ``{path: content}``, in the repository layout
         ``client.request("GET", "/v1/config:export")`` produces — into the Environment.
@@ -273,10 +284,14 @@ class ConfigApi:
         Without ``if_match`` this is the preview. With it — the preview's ``version``, which
         also pins the files themselves — it applies, and is refused if the configuration
         moved or the files differ from the ones previewed.
+
+        A breaking model change applied into a production Environment needs
+        ``allow_breaking=True``; the preview lists the breaking changes first.
         """
         body: dict[str, Any] = {
             "files": [{"path": path, "content": content} for path, content in files.items()],
             "dry_run": if_match is None,
+            "allow_breaking": allow_breaking,
         }
         return self._apply("POST", "/v1/config:import", body, if_match)
 
@@ -286,6 +301,7 @@ class ConfigApi:
         *,
         source: str,
         if_match: Precondition | str | int | None = None,
+        allow_breaking: bool = False,
     ) -> dict[str, Any]:
         """Promote configuration from the ``source`` Environment into the ``target`` one, both
         by Environment id (Organization-scoped: the connection's Environment is not consulted).
@@ -294,8 +310,15 @@ class ConfigApi:
         covers both Environments' configuration as the preview read them — it applies, and is
         refused if either moved since. Promoting into a production Environment requires the
         Organization Owner.
+
+        A breaking model change promoted into a production Environment needs
+        ``allow_breaking=True``; the preview lists the breaking changes first.
         """
-        body = {"source_environment_id": source, "dry_run": if_match is None}
+        body = {
+            "source_environment_id": source,
+            "dry_run": if_match is None,
+            "allow_breaking": allow_breaking,
+        }
         return self._apply("POST", f"/v1/environments/{target}/config:promote-from", body, if_match)
 
     def _apply(
