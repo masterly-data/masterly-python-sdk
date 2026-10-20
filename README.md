@@ -352,6 +352,29 @@ refused apply raises `ApiError` whose `conflict` names the configuration objects
 release that is not published yet; an install on an earlier release ignores the header and
 answers the preview without a `version`.
 
+A breaking change to a model — dropping an attribute, say — applied into a production Environment
+is refused unless you acknowledge it with `allow_breaking=True`. The preview lists the breaking
+changes first, so read them before you acknowledge. The refusal is a 409, and
+`ApiError.breaking_changes` lists the models and their changes. The SDK never sets the flag for
+you.
+
+```python
+from masterly import ApiError
+
+preview = client.config.promote("env_prod_eu", source="env_stage_eu")
+try:
+    client.config.promote("env_prod_eu", source="env_stage_eu", if_match=preview["version"])
+except ApiError as err:
+    if err.breaking_changes is None:
+        raise
+    print(err.breaking_changes)                      # review what the apply would break
+    client.config.promote(
+        "env_prod_eu", source="env_stage_eu", if_match=preview["version"], allow_breaking=True
+    )
+```
+
+`allow_breaking` works the same way on `pull` and `import_files`.
+
 ## Errors
 
 The client is a thin, typed wrapper over the stable `/v1` REST contract — the same API

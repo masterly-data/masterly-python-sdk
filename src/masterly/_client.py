@@ -77,6 +77,19 @@ class ApiError(Exception):
             return None
         return Conflict.from_details(self.code, self.details)
 
+    @property
+    def breaking_changes(self) -> list[Any] | None:
+        """The breaking changes a 409 refused to apply, else None.
+
+        Passed through as the server sent them (``details["breaking_changes"]``): for a whole
+        configuration apply, a list of models and their changes. None for any other error,
+        and for a 409 that carries no such list (a ``VERSION_CONFLICT``, for one).
+        """
+        changes = self.details.get("breaking_changes")
+        if self.status_code != 409 or not isinstance(changes, list):
+            return None
+        return list(changes)
+
 
 class Client:
     """Connection to one Masterly Environment.
