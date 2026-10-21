@@ -57,6 +57,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/masterly"]
 
+[tool.uv]
+# GHSA-6q48-6c7w-9gw2. certifi arrives through httpx/httpcore, not directly. A constraint,
+# not a dependency, so the published requirements stay ["httpx>=0.27"]; this only sets the
+# floor for this repository's lock.
+constraint-dependencies = ["certifi>=2026.10.19"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
