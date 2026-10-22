@@ -23,7 +23,7 @@ from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, SourceTarget
 from masterly._precondition import Conflict, Precondition
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 __all__ = [
     "ApiError",
