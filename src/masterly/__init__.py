@@ -10,6 +10,8 @@ cover enough configuration to stand an Environment up from a script, and ``clien
 previews and applies the whole of it at once — a pull from Git, an imported file set, a
 promotion from another Environment; ``client.products`` and ``client.golden`` read out of it.
 ``client.jobs`` follows the asynchronous work an ingest batch or a full load starts.
+Where a change gate holds a write for approval, :meth:`WriteResult.of` says so, and
+``client.pending_changes`` and ``client.workflows`` read what it is waiting on.
 
 Two token personas connect. :class:`Client` is a signed-in person's session, scoped to the
 Environment it names. :meth:`Client.for_service_account` is a machine: pinned to its own
@@ -18,16 +20,18 @@ principal may consume — the persona a scheduled load should hold. The README's
 personas" says how to get either one.
 """
 
-from masterly._client import ApiError, Client, Persona
+from masterly._client import ApiError, ChangePending, Client, Persona
 from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, SourceTarget
+from masterly._pending import WriteResult
 from masterly._precondition import Conflict, Precondition
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "ApiError",
     "ChangeFeed",
+    "ChangePending",
     "Client",
     "Conflict",
     "FullLoad",
@@ -38,5 +42,6 @@ __all__ = [
     "Precondition",
     "RowPages",
     "SourceTarget",
+    "WriteResult",
     "__version__",
 ]

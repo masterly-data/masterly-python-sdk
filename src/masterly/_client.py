@@ -26,6 +26,7 @@ from masterly._config import ConfigApi, DataModelsApi, DomainsApi, WorkspacesApi
 from masterly._extract import GoldenApi, ProductsApi
 from masterly._ingest import SourcesApi
 from masterly._jobs import JobsApi
+from masterly._pending import CHANGE_PENDING, PendingChangesApi, WorkflowsApi
 from masterly._precondition import (
     OBJECT_REMOVED,
     VERSION_CONFLICT,
@@ -91,6 +92,32 @@ class ApiError(Exception):
         return list(changes)
 
 
+class ChangePending(ApiError):
+    """A ``409 CHANGE_PENDING``: a change to a cell this write addresses is already waiting for
+    approval, and it applies, is rejected or is withdrawn before another can be held.
+
+    It names the waiting change, never its values. Raised only where a customer has configured
+    a change gate; read the change with ``client.pending_changes.get(error.pending_change_id)``.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(status_code, code, message, details)
+        change_id = self.details.get("pending_change_id")
+        instance_id = self.details.get("workflow_instance_id")
+        #: The change already waiting on the cell.
+        self.pending_change_id: str | None = change_id if isinstance(change_id, str) else None
+        #: The workflow instance deciding it.
+        self.workflow_instance_id: str | None = (
+            instance_id if isinstance(instance_id, str) else None
+        )
+
+
 class Client:
     """Connection to one Masterly Environment.
 
@@ -140,6 +167,8 @@ class Client:
         self.data_models = DataModelsApi(self)
         self.config = ConfigApi(self)
         self.jobs = JobsApi(self)
+        self.pending_changes = PendingChangesApi(self)
+        self.workflows = WorkflowsApi(self)
 
     @classmethod
     def for_service_account(
@@ -240,6 +269,11 @@ class Client:
 
         A 409 raises :class:`~masterly.ApiError` whose ``conflict`` says what moved. Returns the
         decoded body, or None for a 204 or an empty one.
+
+        Where a customer has configured a change gate, a write may be held for approval instead
+        of applied: it answers ``202`` with ``status: pending_approval``, and a second change to
+        the same cell raises :class:`~masterly.ChangePending`. The body is returned as sent;
+        :meth:`WriteResult.of(body) <masterly.WriteResult.of>` says which it was.
         """
         return self._request(
             method,
@@ -339,7 +373,8 @@ class Client:
                 code = envelope.get("code", code)
                 message = envelope.get("message", message)
                 details = envelope.get("details")
-            raise ApiError(
+            held = response.status_code == 409 and code == CHANGE_PENDING
+            raise (ChangePending if held else ApiError)(
                 response.status_code,
                 code,
                 message,

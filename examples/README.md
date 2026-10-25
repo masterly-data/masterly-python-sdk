@@ -223,3 +223,19 @@ is a modelling mistake, not a tuning problem, and it is worth seeing once.
 
 Ingest is asynchronous. Without `--wait` the script returns as soon as the batches are
 accepted, and the records appear a few seconds later.
+
+# Held writes
+
+[`held_writes.py`](held_writes.py) authors one record and says what became of it. Where a
+customer has configured a change gate on the model, the write is held for approval rather than
+applied — `WriteResult.of` tells the two apart, and the script then reads the pending change and
+the workflows gating the model. A second change to a cell that is already waiting raises
+`ChangePending`, which names the waiting change. Without a gate the write simply applies.
+
+```bash
+uv run examples/held_writes.py --base-url … --token "$MASTERLY_TOKEN" \
+    --environment env_prod_eu --model Supplier --values '{"supplier_no": "S1"}'
+```
+
+It needs **0.7.0 or later** and a session token: pending changes and workflows are a person's
+reads. `tests/test_held_writes.py` runs it against a mock of each answer.

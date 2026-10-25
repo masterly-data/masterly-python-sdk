@@ -172,6 +172,7 @@ the account. Either way it goes in the `token` argument above.
 | The account was revoked, or is unknown | `ApiError`, 401 `SERVICE_ACCOUNT_INVALID` |
 | A session route — a listing, configuration, golden records, a Source's counters, a job | `ApiError`, 401 `UNAUTHENTICATED` |
 | A Source or product addressed by name | `PermissionError`, before anything is sent |
+| Pending changes or workflows (`client.pending_changes`, `client.workflows`) | `PermissionError`, before anything is sent |
 
 Scopes are fixed when the account is created. Widening one is not a permission someone grants
 after the fact — it is a new account, and the old one is revoked.
@@ -375,6 +376,43 @@ except ApiError as err:
 
 `allow_breaking` works the same way on `pull` and `import_files`.
 
+### A write a change gate holds for approval
+
+Where a customer has configured a change gate (a workflow whose trigger is a change to a model),
+a governed write — `POST /v1/records`, a pin or an unpin — may be **held** rather than applied:
+it answers `202` with `status: pending_approval`, a `pending_change_id` and the
+`workflow_instance_id` deciding it, and nothing downstream sees the change until it applies.
+While it waits, another change to the same cell raises `ChangePending`. Without a gate neither
+happens, and every write answers as it always has.
+
+`client.request` returns the body as sent either way. `WriteResult.of(body)` is the typed view
+over it: `held`, `status` (`applied` or `pending_approval`), the two ids, and the `body`. A
+gate whose steps all finished at once answers `202` with `status: applied` — not held, and its
+ids still name the change and the instance that applied it.
+
+<!-- example:held-write -->
+```python
+from masterly import ChangePending, WriteResult
+
+try:
+    body = client.request("POST", "/v1/records", if_none_match=True,
+                          json={"model_name": "Supplier", "values": {"supplier_no": "S1"}})
+except ChangePending as waiting:
+    print("already waiting for approval:", waiting.pending_change_id)  # names it, never its values
+else:
+    result = WriteResult.of(body)
+    if result.held:
+        change = client.pending_changes.get(result.pending_change_id)
+        print("held as", result.pending_change_id, "decided by", result.workflow_instance_id)
+```
+<!-- /example -->
+
+`client.pending_changes.list(model=…, global_id=…, status=…, maker=…)` and `.get(id)` read held
+changes and what became of them (`pending`, `applied`, `discarded`, `stale`, `failed`);
+`client.workflows.list()` and `.get(key)` read the workflow definitions. Both are session
+routes, refused on a service-account connection before anything is sent. They need an install
+on API 0.134.0 or later.
+
 ## Errors
 
 The client is a thin, typed wrapper over the stable `/v1` REST contract — the same API
@@ -382,6 +420,12 @@ every other channel uses. Errors raise `masterly.ApiError` carrying the server's
 code, message, and `details` — the envelope's own payload, passed through as sent, which is
 where a refusal explains itself. Re-delivery is idempotent: records upsert by their source key,
 so running the same notebook twice never duplicates data.
+
+A `409 CHANGE_PENDING` raises `masterly.ChangePending`, an `ApiError` whose `pending_change_id`
+names the change already waiting on the cell (and `workflow_instance_id` the instance deciding
+it, when the server sends one; otherwise None). It occurs only where a
+customer has configured a change gate. Every other 409 — `VERSION_CONFLICT`, `OBJECT_REMOVED` —
+stays a plain `ApiError` whose `conflict` says what moved.
 
 `pandas` is an optional dependency: `pip install masterly[pandas]`.
 
@@ -574,6 +618,9 @@ Nothing is committed: review the diff, then commit it. The warning's trailing id
 customers, suppliers and products as three source systems would actually deliver them,
 duplicates and defects included, linked to a Country code list, to each other and to an
 embedded contact — and ingests it into an Environment.
+
+[`examples/held_writes.py`](examples/held_writes.py) authors a record and tells an applied write
+from one a change gate holds for approval.
 
 ## Releases
 
