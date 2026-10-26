@@ -402,6 +402,7 @@ except ChangePending as waiting:
 else:
     result = WriteResult.of(body)
     if result.held:
+        assert result.pending_change_id is not None  # a held result always names its change
         change = client.pending_changes.get(result.pending_change_id)
         print("held as", result.pending_change_id, "decided by", result.workflow_instance_id)
 ```

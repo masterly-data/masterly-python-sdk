@@ -44,6 +44,7 @@ class WriteResult:
 
         result = WriteResult.of(client.request("POST", "/v1/records", json=...))
         if result.held:
+            assert result.pending_change_id is not None  # a held result always names its change
             change = client.pending_changes.get(result.pending_change_id)
 
     A held result occurs only where a customer has configured a change gate; everywhere else

@@ -41,6 +41,7 @@ def author(client: Client, model: str, values: dict[str, Any]) -> str:
         return "applied"
     # Nothing has applied yet. Keep the ids: the pending change says what was proposed, and
     # the workflow instance decides it.
+    assert result.pending_change_id is not None  # a held result always names its change
     change = client.pending_changes.get(result.pending_change_id)
     workflows = [w["key"] for w in client.workflows.list(model=model)]
     print(
