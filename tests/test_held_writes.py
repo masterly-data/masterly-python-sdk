@@ -18,8 +18,8 @@ from typing import Any
 import httpx
 import pytest
 
-import masterly
 from masterly import ApiError, ChangePending, Client, WriteResult
+from masterly import __all__ as public_names
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -193,7 +193,7 @@ def test_a_curation_staged_op_is_not_read_as_a_gate_hold() -> None:
 
 def test_change_pending_is_an_api_error_naming_the_waiting_change() -> None:
     error = _refused(_CHANGE_PENDING)
-    assert isinstance(error, ChangePending) and isinstance(error, masterly.ApiError)
+    assert isinstance(error, ChangePending) and isinstance(error, ApiError)
     assert error.status_code == 409 and error.code == "CHANGE_PENDING"
     assert error.pending_change_id == _CHANGE_PENDING["error"]["details"]["pending_change_id"]
     assert error.workflow_instance_id == "wfi_01JA2F"
@@ -302,7 +302,7 @@ def test_a_service_account_cannot_read_pending_changes_or_workflows(
 
 
 def test_the_held_write_names_are_public() -> None:
-    assert {"WriteResult", "ChangePending"} <= set(masterly.__all__)
+    assert {"WriteResult", "ChangePending"} <= set(public_names)
 
 
 # --- the README and the example ---------------------------------------------------------
