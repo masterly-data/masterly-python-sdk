@@ -38,6 +38,12 @@ eu = job.products.read(
     fields=["global_id", "name", "tier"],
 )
 
+# A point-in-time read: what Masterly held at that instant (processing time). Pass a
+# timezone-aware datetime or an ISO 8601 string; products that can't serve it are refused
+# with ApiError code AS_OF_NOT_SUPPORTED
+from datetime import datetime, timezone
+then = job.products.read("dp_a1b2c3", as_of=datetime(2026, 10, 1, tzinfo=timezone.utc))
+
 # Follow the change feed with a resumable cursor
 feed = job.products.changes("dp_a1b2c3", cursor=saved_cursor)
 for change in feed:

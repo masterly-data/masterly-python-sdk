@@ -82,6 +82,106 @@ def test_a_fields_only_read_stays_a_get_with_the_names_in_the_query() -> None:
     assert seen == [("GET", "/v1/consume/products/dp_1", {"fields": "name,region", "limit": "200"})]
 
 
+_AS_OF = "2026-10-01T00:00:00Z"
+_FILTERS = [{"attribute": "region", "op": "equals", "values": ["EU"]}]
+
+
+def _two_pages(seen: list[httpx.Request]) -> Any:
+    """Replays the consume contract of masterly-application-backend v0.134.0 (MAS-721):
+    `as_of` is a query parameter on GET and a body field on POST `:read`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = json.loads(request.content) if request.content else {}
+        cursor = body.get("cursor") or request.url.params.get("cursor")
+        if cursor is None:
+            return httpx.Response(200, json={"items": [{"id": 1}], "next_cursor": "c2"})
+        return httpx.Response(200, json={"items": [{"id": 2}], "next_cursor": None})
+
+    return handler
+
+
+def test_as_of_on_a_get_read_travels_in_the_query_on_every_page() -> None:
+    """backend v0.134.0: `GET …/products/{id}?as_of=<t>`, carried by each page with the cursor."""
+    seen: list[httpx.Request] = []
+    rows = list(_client(_two_pages(seen)).products.read("dp_1", as_of=_AS_OF))
+    assert [r["id"] for r in rows] == [1, 2]
+    assert [(r.method, r.url.path) for r in seen] == [("GET", "/v1/consume/products/dp_1")] * 2
+    assert dict(seen[0].url.params) == {"as_of": _AS_OF, "limit": "200"}
+    assert dict(seen[1].url.params) == {"as_of": _AS_OF, "limit": "200", "cursor": "c2"}
+
+
+def test_as_of_on_a_filtered_read_travels_in_the_body_on_every_page() -> None:
+    """backend v0.134.0: `POST …/products/{id}:read` takes `as_of` in the body beside filters."""
+    seen: list[httpx.Request] = []
+    list(
+        _client(_two_pages(seen)).products.read(
+            "dp_1", filters=_FILTERS, fields=["name"], as_of=_AS_OF
+        )
+    )
+    posted = ("POST", "/v1/consume/products/dp_1:read")
+    assert [(r.method, r.url.path) for r in seen] == [posted] * 2
+    assert all(r.url.query == b"" for r in seen)
+    assert json.loads(seen[0].content) == {
+        "filters": _FILTERS,
+        "fields": ["name"],
+        "as_of": _AS_OF,
+        "limit": 200,
+    }
+    second = json.loads(seen[1].content)
+    assert second["as_of"] == _AS_OF and second["cursor"] == "c2"
+
+
+def test_an_aware_datetime_as_of_is_sent_as_its_isoformat() -> None:
+    seen: list[httpx.Request] = []
+    moment = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    list(_client(_two_pages(seen)).products.read("dp_1", as_of=moment))
+    assert seen[0].url.params["as_of"] == moment.isoformat() == "2026-10-01T00:00:00+00:00"
+    seen.clear()
+    list(_client(_two_pages(seen)).products.read("dp_1", filters=_FILTERS, as_of=moment))
+    assert json.loads(seen[0].content)["as_of"] == "2026-10-01T00:00:00+00:00"
+
+
+def test_a_naive_datetime_as_of_is_rejected_before_any_request() -> None:
+    seen: list[httpx.Request] = []
+    client = _client(_two_pages(seen))
+    naive = datetime(2026, 10, 1)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        client.products.read("Customer 360", as_of=naive)  # by name: would list products
+    with pytest.raises(ValueError, match="timezone-aware"):
+        client.products.read("dp_1", filters=_FILTERS, as_of=naive)
+    assert seen == []
+
+
+def test_omitting_as_of_sends_no_as_of_key() -> None:
+    seen: list[httpx.Request] = []
+    list(_client(_two_pages(seen)).products.read("dp_1"))
+    assert "as_of" not in seen[0].url.params
+    seen.clear()
+    list(_client(_two_pages(seen)).products.read("dp_1", filters=_FILTERS))
+    assert "as_of" not in json.loads(seen[0].content)
+
+
+def test_an_unsupported_as_of_read_surfaces_as_an_api_error() -> None:
+    """backend v0.134.0 refuses joins, derived columns etc. with 400 AS_OF_NOT_SUPPORTED."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "code": "AS_OF_NOT_SUPPORTED",
+                    "message": "as_of is not supported for this product",
+                    "details": {},
+                }
+            },
+        )
+
+    with pytest.raises(ApiError) as caught:
+        list(_client(handler).products.read("dp_1", as_of=_AS_OF))
+    assert caught.value.code == "AS_OF_NOT_SUPPORTED"
+
+
 def test_change_feed_exposes_resumable_cursor() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/data-products":
