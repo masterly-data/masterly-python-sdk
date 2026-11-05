@@ -26,7 +26,7 @@ from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, 
 from masterly._pending import WriteResult
 from masterly._precondition import Conflict, Precondition
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     "ApiError",
