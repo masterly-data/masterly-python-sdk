@@ -1,8 +1,9 @@
 """Review mode, a manual workflow start and the source hold over a mock transport (ADR 0099).
 
 A write a review-mode gate applied reads ``under_review``; ``client.workflows.start`` sends a
-start and reads its rows; ``QuarantineReason`` reads a quarantine row's workflow code; and the
-source-hold example prints ids and codes, never a payload value.
+start and reads its rows; ``QuarantineReason`` reads a quarantine row's workflow code; the
+source-hold example prints ids and codes, never a payload value; and the held-writes example
+says a reviewed write is under review.
 
 Every fixture follows a schema of the backend's v0.136.0 contract (``docs/contract/openapi.json``),
 named in the comment above it with the version that brought the field or route.
@@ -136,7 +137,8 @@ def _quarantined(quarantine_id: str, reason_code: str) -> dict[str, Any]:
 
 
 def _page(items: list[Any], next_cursor: str | None) -> dict[str, Any]:
-    """Page_PendingChangeView_ / Page_QuarantineRecordView_: items, next_cursor, total."""
+    """Page_PendingChangeView_ / Page_QuarantineRecordView_, v0.136.0: items, next_cursor,
+    total."""
     return {"items": items, "next_cursor": next_cursor, "total": None}
 
 
@@ -398,3 +400,27 @@ def test_the_source_hold_example_reports_ids_never_a_payload_value(
     for value in (_IBAN, "GB82", _REASON, "S1"):
         assert value not in printed.out and value not in printed.err
     assert all(_IBAN not in str(r.url) for r in seen)
+
+
+# --- the held-writes example ------------------------------------------------------------
+
+
+def test_the_held_writes_example_says_a_reviewed_write_is_under_review(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        return httpx.Response(201, json=_CREATED_UNDER_REVIEW)
+
+    path = _ROOT / "examples" / "held_writes.py"
+    spec = importlib.util.spec_from_file_location("held_writes", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["held_writes"] = module
+    spec.loader.exec_module(module)
+
+    assert module.author(_client(handler), "Supplier", {"supplier_no": "S1"}) == "under_review"
+    assert seen == ["POST /v1/records"]
+    assert capsys.readouterr().out == "applied, under review by instance wfi_01JB3C\n"

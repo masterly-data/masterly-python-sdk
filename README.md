@@ -392,9 +392,10 @@ While it waits, another change to the same cell raises `ChangePending`. Without 
 happens, and every write answers as it always has.
 
 `client.request` returns the body as sent either way. `WriteResult.of(body)` is the typed view
-over it: `held`, `status` (`applied` or `pending_approval`), the two ids, and the `body`. A
-gate whose steps all finished at once answers `202` with `status: applied` — not held, and its
-ids still name the change and the instance that applied it.
+over it: `held`, `under_review`, `status` (`applied`, `pending_approval` or `under_review`, the
+last only under a review-mode gate, below), the two ids, and the `body`. A gate whose steps all
+finished at once answers `202` with `status: applied` — not held, and its ids still name the
+change and the instance that applied it.
 
 <!-- example:held-write -->
 ```python
