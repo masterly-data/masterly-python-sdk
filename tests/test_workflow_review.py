@@ -356,6 +356,7 @@ def _erp(seen: list[httpx.Request]) -> Callable[[httpx.Request], httpx.Response]
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         if request.url.path == "/v1/ingest":
+            # JobAccepted — POST /v1/ingest, 202, v0.136.0.
             return httpx.Response(202, json={"job_id": "job_01JB45"})
         code = request.url.params["reason_code"]
         held = "qr_01JB46" if code.startswith("workflow:") else "qr_01JB47"
