@@ -178,7 +178,7 @@ the account. Either way it goes in the `token` argument above.
 | The account was revoked, or is unknown | `ApiError`, 401 `SERVICE_ACCOUNT_INVALID` |
 | A session route — a listing, configuration, golden records, a Source's counters, a job | `ApiError`, 401 `UNAUTHENTICATED` |
 | A Source or product addressed by name | `PermissionError`, before anything is sent |
-| Pending changes or workflows (`client.pending_changes`, `client.workflows`) | `PermissionError`, before anything is sent |
+| Pending changes or workflows (`client.pending_changes`, `client.workflows`), including starting one (`client.workflows.start`) | `PermissionError`, before anything is sent |
 
 Scopes are fixed when the account is created. Widening one is not a permission someone grants
 after the fact — it is a new account, and the old one is revoked.
@@ -420,6 +420,31 @@ changes and what became of them (`pending`, `applied`, `discarded`, `stale`, `fa
 routes, refused on a service-account connection before anything is sent. They need an install
 on API 0.134.0 or later.
 
+**Review mode.** A change gate in review mode applies the write at once and reviews it after.
+The write answers as an applied one — `201` for a created record, `202` for a pin or a batch of
+pins — with `workflow_instance_id` set, and `WriteResult.of` reads it as
+`status == "under_review"`: `under_review` is true, `held` is false, `pending_change_id` is
+None, and `workflow_instance_id` names the instance that confirms or rejects it.
+`client.pending_changes.list(status="under_review")` lists open reviews, and `confirmed` and
+`rejected` what became of them. Without a review-mode gate no write reads `under_review`.
+
+**Starting a workflow on records.** A person starts a manual-start workflow with
+`client.workflows.start(key, records=[...], note=...)`. The answer is a `WorkflowStartResult`:
+the `total`, `started`, `queued` and `refused` counts, and in `results` one `WorkflowStartItem`
+per record in request order — `started` with its `instance_id`, `queued` with its `position`,
+or `refused` with a stable `code` such as `WORKFLOW_ALREADY_RUNNING`. It is session-only, and
+the server decides who may start which workflow.
+
+**Source records a workflow holds.** A source gate holds an arriving record in the Source's
+quarantine with `reason_code` `workflow:<key>` while the workflow decides it, and quarantines a
+payload an approver already rejected with `workflow-rejected:<key>`.
+`QuarantineReason.of(row)` reads the code — `held`, `rejected` and `workflow_key` — and never
+the row's `payload` or `reason`. A service account reads these for the Sources its `ingest`
+scope names: `client.sources.quarantine(source_id, reason_code="workflow:supplier-bank-change")`.
+[`examples/source_hold.py`](examples/source_hold.py) does it for an ERP integration.
+
+Review mode, the start call and the quarantine codes need an install on API 0.136.0 or later.
+
 ## Errors
 
 The client is a thin, typed wrapper over the stable `/v1` REST contract — the same API
@@ -628,6 +653,9 @@ embedded contact — and ingests it into an Environment.
 
 [`examples/held_writes.py`](examples/held_writes.py) authors a record and tells an applied write
 from one a change gate holds for approval.
+
+[`examples/source_hold.py`](examples/source_hold.py) delivers a supplier's IBAN from an ERP on a
+service account and lists the source records a workflow holds or already rejected.
 
 ## Releases
 
