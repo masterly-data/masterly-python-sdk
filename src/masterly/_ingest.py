@@ -313,7 +313,10 @@ class SourcesApi:
         Each row names the target it was held for in ``model_name``; ``model`` lists one
         target's rows only. ``status`` is ``open``, ``resolved`` or ``discarded``, and
         ``reason_code`` one code of the summary (``translation-miss:country:countries``), to
-        review one cause at a time. Both token personas: a service account reads the
+        review one cause at a time. :meth:`~masterly.QuarantineReason.of` reads a row's code
+        as typed: ``workflow:<key>`` for a row a source gate holds for that workflow,
+        ``workflow-rejected:<key>`` for one an approver already rejected. Both token
+        personas: a service account reads the
         quarantine of the Sources its ``ingest`` scope names, each payload masked exactly as
         it is for a person. Working the quarantine — retrying, reprocessing, discarding — is
         a person's job, through the app or :meth:`~masterly.Client.request`.

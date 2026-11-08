@@ -230,12 +230,36 @@ accepted, and the records appear a few seconds later.
 customer has configured a change gate on the model, the write is held for approval rather than
 applied — `WriteResult.of` tells the two apart, and the script then reads the pending change and
 the workflows gating the model. A second change to a cell that is already waiting raises
-`ChangePending`, which names the waiting change. Without a gate the write simply applies.
+`ChangePending`, which names the waiting change. A gate in review mode applies the write at once,
+and the script prints the workflow instance that may still reject it. Without a gate the write
+simply applies.
 
 ```bash
 uv run examples/held_writes.py --base-url … --token "$MASTERLY_TOKEN" \
     --environment env_prod_eu --model Supplier --values '{"supplier_no": "S1"}'
 ```
 
-It needs **0.7.0 or later** and a session token: pending changes and workflows are a person's
-reads. `tests/test_held_writes.py` runs it against a mock of each answer.
+It needs **0.9.0 or later** and a session token: pending changes and workflows are a person's
+reads. `tests/test_held_writes.py` and `tests/test_workflow_review.py` run it against a mock of
+each answer.
+
+# Source records a workflow holds
+
+[`source_hold.py`](source_hold.py) is an ERP integration on a service account. It delivers a
+supplier's IBAN to a Source, then reads the Source's open quarantine. Where a customer has
+configured a source gate, the record waits there with `reason_code` `workflow:<key>` until an
+approver decides it, and a payload an approver already rejected is quarantined with
+`workflow-rejected:<key>`. `QuarantineReason.of` tells the two apart, and the script prints
+only the quarantine ids and the workflow key, never the payload or the `reason`, which names the
+value. Without a source gate both lists stay empty.
+
+```bash
+uv run examples/source_hold.py --base-url … --token "$MASTERLY_SERVICE_ACCOUNT_TOKEN" \
+    --source src_… --supplier-no S1 --iban GB82WEST12345698765432 \
+    --workflow supplier-bank-change
+```
+
+`GB82WEST12345698765432` is the IBAN standard's own example account. The script needs **0.9.0
+or later**, an install on API 0.136.0 or later, and a service account whose `ingest` scope
+names the Source. `tests/test_workflow_review.py` runs it against a mock and checks that no
+payload value is printed.

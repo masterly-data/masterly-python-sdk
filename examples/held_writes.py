@@ -3,11 +3,12 @@
 
 Where a customer has configured a change gate on a model, ``POST /v1/records`` may answer
 ``202`` with ``status: pending_approval`` instead of applying, and a second change to the same
-cell is refused ``409 CHANGE_PENDING`` until the first is decided. Where no gate is configured,
-the write applies and this script simply says so.
+cell is refused ``409 CHANGE_PENDING`` until the first is decided. A gate in review mode applies
+the write at once and names the workflow instance that may still reject it. Where no gate is
+configured, the write applies and this script simply says so.
 
     # from this checkout: uv run examples/held_writes.py …
-    # anywhere else:      uv run --with 'masterly>=0.7.0' held_writes.py …
+    # anywhere else:      uv run --with 'masterly>=0.9.0' held_writes.py …
     uv run examples/held_writes.py --base-url http://localhost:8001 --token "$TOKEN" \
         --environment env_prod_eu --model Supplier --values '{"supplier_no": "S1"}'
 """
@@ -22,7 +23,8 @@ from masterly import ChangePending, Client, WriteResult
 
 
 def author(client: Client, model: str, values: dict[str, Any]) -> str:
-    """Write one record and say what became of it: ``applied``, ``held`` or ``waiting``."""
+    """Write one record and say what became of it: ``applied``, ``under_review``, ``held`` or
+    ``waiting``."""
     try:
         body = client.request(
             "POST",
@@ -36,6 +38,10 @@ def author(client: Client, model: str, values: dict[str, Any]) -> str:
         print(f"a change to these cells is already waiting: {waiting.pending_change_id}")
         return "waiting"
     result = WriteResult.of(body)
+    if result.under_review:
+        # The change applied, but a review-mode gate's workflow instance may still reject it.
+        print(f"applied, under review by instance {result.workflow_instance_id}")
+        return "under_review"
     if not result.held:
         print("applied")
         return "applied"
