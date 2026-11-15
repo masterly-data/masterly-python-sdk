@@ -220,9 +220,10 @@ def test_the_layout_routes_exactly_the_files_the_server_reads() -> None:
 def test_code_lists_are_read_under_their_new_directory_and_their_old_one(tmp_path: Path) -> None:
     """ADR 0146 renamed the reference list the code list: `code-lists/` is the directory now,
     and `reference/`, the old one, still routes, so a repository laid out either way (or half
-    moved) has every code list walked."""
-    assert _schema.section_of("code-lists/x.yaml") == "code_lists"
-    assert _schema.section_of("code-lists/iso/countries.yml") == "code_lists"
+    moved) has every code list walked. Both land in the server's one section for them,
+    `reference_lists`, which its deprecation ids name, so a step on it visits both."""
+    assert _schema.section_of("code-lists/x.yaml") == "reference_lists"
+    assert _schema.section_of("code-lists/iso/countries.yml") == "reference_lists"
     assert _schema.section_of("reference/x.yaml") == "reference_lists"
     assert _schema.section_of("code-lists/README.md") is None
 
@@ -235,7 +236,7 @@ def test_code_lists_are_read_under_their_new_directory_and_their_old_one(tmp_pat
         },
     )
     assert _engine._documents(root) == [
-        ("code-lists/currencies.yaml", "code_lists"),
+        ("code-lists/currencies.yaml", "reference_lists"),
         ("reference/countries.yaml", "reference_lists"),
     ]
 
