@@ -88,7 +88,7 @@ ALL_MODELS = sorted(demo_data.MODEL_SPECS)
 # Customer, so it has a definition and no source of its own.
 DELIVERED = sorted(k for k, s in demo_data.MODEL_SPECS.items() if s.sources)
 # Entity models go through identity resolution, so the rules about shared business keys and
-# match configs are theirs. A reference model is a code list keyed on the code itself.
+# match configs are theirs. A reference model, Country, is keyed on the code itself.
 ENTITIES = sorted(k for k in DELIVERED if demo_data.MODEL_SPECS[k].kind == "entity")
 
 
@@ -174,7 +174,7 @@ def test_generation_is_reproducible(model_key: str) -> None:
     second = [b.records for b in build(model_key, defect_rate=0.1)]
     assert first == second
     if demo_data.MODEL_SPECS[model_key].kind == "reference":
-        return  # a code list is the same list whatever the seed
+        return  # reference data is the same countries whatever the seed
     different = [b.records for b in build(model_key, seed=99, defect_rate=0.1)]
     assert first != different
 
@@ -479,7 +479,7 @@ def test_bootstrap_creates_every_target_before_the_model_that_links_to_it() -> N
     assert len(order) == len(set(order))
 
 
-def test_the_code_list_covers_every_country_an_address_uses() -> None:
+def test_the_country_model_covers_every_country_an_address_uses() -> None:
     codes = {code for code, *_ in demo_data.COUNTRIES}
     assert {country for _, country, _, _ in demo_data.CITIES} <= codes
     batches = _generate(["country", "customer", "supplier"], customers=60, suppliers=20)
@@ -531,7 +531,7 @@ def test_products_without_suppliers_in_the_run_carry_no_link() -> None:
     assert not any(r.get("supplier") for r in _conformed(batches["pim"]))
 
 
-def test_adding_the_code_list_to_a_run_changes_no_other_record() -> None:
+def test_adding_the_country_model_to_a_run_changes_no_other_record() -> None:
     """A seed is a promise: re-running it upserts the same records. Country draws from its own
     stream, so a run that now includes it delivers the customers it always delivered."""
     without = _generate(["customer", "supplier"], customers=30, suppliers=10)

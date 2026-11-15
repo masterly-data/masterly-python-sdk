@@ -649,7 +649,7 @@ Nothing is committed: review the diff, then commit it. The warning's trailing id
 
 [`examples/demo_data.py`](examples/README.md) generates realistic demo master data —
 customers, suppliers and products as three source systems would actually deliver them,
-duplicates and defects included, linked to a Country code list, to each other and to an
+duplicates and defects included, linked to a Country reference model, to each other and to an
 embedded contact — and ingests it into an Environment.
 
 [`examples/held_writes.py`](examples/held_writes.py) authors a record and tells an applied write

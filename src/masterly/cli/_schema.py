@@ -39,6 +39,12 @@ ROOT_CONFIG_FILES = frozenset({SCHEMA_VERSION_FILE, "modules.yaml"})
 #: Path prefix -> bundle section: the GitOps repository layout, longer prefixes first. The
 #: section names are the server's (``data_models``, not ``data-models``), because that is what
 #: the deprecation ids and the linter's messages use.
+#:
+#: Code lists have two directories. ``code-lists/`` is their name since the reference list was
+#: renamed the code list (ADR 0146); ``reference/`` is the old name, which the server reads
+#: until its dated cutover, so a repository laid out either way is still walked. Both route to
+#: the one section the server keeps for them, ``reference_lists``: its alias for the new
+#: directory names that section, and so do its deprecation ids for the renames.
 PREFIX_TO_SECTION: tuple[tuple[str, str], ...] = (
     ("structure-fields/", "structure_fields"),
     ("workspaces/", "workspaces"),
@@ -53,6 +59,7 @@ PREFIX_TO_SECTION: tuple[tuple[str, str], ...] = (
     ("rules/match/", "match_configs"),
     ("rules/data-quality/", "dq_rules"),
     ("rules/golden-profiles/", "golden_profiles"),
+    ("code-lists/", "reference_lists"),
     ("reference/", "reference_lists"),
     ("glossary/", "glossary_terms"),
     ("hierarchies/", "hierarchies"),
