@@ -1,0 +1,10 @@
+# What `git archive` leaves out, which includes the "Source code" archives GitHub attaches to a
+# tag or release.
+#
+# `export-ignore` affects `git archive` only. It does not change what a clone sees, and it does
+# not change the sdist on PyPI: hatchling builds that from pyproject.toml and .gitignore.
+
+# Claude Code configuration: the hook a cloud session runs to load Masterly's project-wide agent
+# guidance from a clone alongside this one, and the settings entry that registers it. Nothing a
+# user of the package needs.
+/.claude        export-ignore
