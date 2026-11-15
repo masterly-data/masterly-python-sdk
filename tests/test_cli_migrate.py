@@ -217,6 +217,29 @@ def test_the_layout_routes_exactly_the_files_the_server_reads() -> None:
     assert _schema.section_of("src/data-models/x.yaml") is None
 
 
+def test_code_lists_are_read_under_their_new_directory_and_their_old_one(tmp_path: Path) -> None:
+    """ADR 0146 renamed the reference list the code list: `code-lists/` is the directory now,
+    and `reference/`, the old one, still routes, so a repository laid out either way (or half
+    moved) has every code list walked."""
+    assert _schema.section_of("code-lists/x.yaml") == "code_lists"
+    assert _schema.section_of("code-lists/iso/countries.yml") == "code_lists"
+    assert _schema.section_of("reference/x.yaml") == "reference_lists"
+    assert _schema.section_of("code-lists/README.md") is None
+
+    root = _write_repo(
+        tmp_path,
+        {
+            "modules.yaml": "activated: []\n",
+            "code-lists/currencies.yaml": "name: currencies\ncodes: []\n",
+            "reference/countries.yaml": "name: countries\ncodes: []\n",
+        },
+    )
+    assert _engine._documents(root) == [
+        ("code-lists/currencies.yaml", "code_lists"),
+        ("reference/countries.yaml", "reference_lists"),
+    ]
+
+
 def test_migrate_produces_a_reviewable_diff_over_a_multi_file_repo(
     tmp_path: Path, announced: _schema.Migration, capsys: pytest.CaptureFixture[str]
 ) -> None:

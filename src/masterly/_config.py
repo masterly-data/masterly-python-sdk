@@ -136,8 +136,8 @@ class DataModelsApi:
     ) -> dict[str, Any]:
         """Create a Data Model as a draft. It masters nothing until it is published.
 
-        ``kind`` is ``entity`` — flows through identity resolution and golden resolution —
-        or ``reference`` for a controlled list.
+        ``kind`` is ``entity`` (the default) or ``reference``, a model of reference data
+        such as countries or currencies.
         """
         body: dict[str, Any] = {
             "domain_id": DomainsApi(self._client)._resolve(domain),

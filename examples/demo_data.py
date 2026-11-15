@@ -4,7 +4,7 @@
 Run it against an empty Environment and it bootstraps what it needs — Workspace, Domain,
 Data Models (published), and one Source per originating system — then generates a
 population of business entities and delivers them over ``POST /v1/ingest``. The models link
-to each other — customers and suppliers to a Country code list, products to their supplier,
+to each other — customers and suppliers to a Country reference model, products to their supplier,
 a subsidiary to its parent company, a customer to its embedded contact — so every
 relationship view has something to show.
 
@@ -223,7 +223,8 @@ COUNTRY_DEFINITION: dict[str, Any] = {
          "description": "ISO 4217 code of the country's currency"},
     ],
     # A reference model is keyed on the code everyone shares — which is also each source's
-    # own key, because a code list has one identifier and no per-system numbering.
+    # own key, because a country here has one code that every system uses, and no per-system
+    # numbering.
     "keys": [{"name": "code", "attributes": ["code"]}],
     "display_attribute": "name",
 }
@@ -377,8 +378,9 @@ class ModelSpec:
     description: str
     sources: tuple[SourceSpec, ...]
     defects: tuple[Defect, ...]
-    # `entity` flows through identity resolution and golden resolution; `reference` is a
-    # controlled list such as a code list. Both are ingested and mastered the same way.
+    # `entity` or `reference`: a reference model holds reference data, such as countries, whose
+    # records are matched on their code. Both are ingested and mastered through the same
+    # pipeline.
     kind: str = "entity"
     # Probabilistic matching for the records the business key cannot resolve — a system that
     # does not carry the registration number, or a record where it is missing. Blocking is on
@@ -523,7 +525,7 @@ COUNTRY_SOURCES = (
         key_attribute="code",
         key_template="{code}",
         coverage=1.0,
-        # Passthrough: a published code list already speaks the model's names.
+        # Passthrough: a published standard (ISO 3166) already speaks the model's names.
         field_map={},
         noise=0.0,
     ),
@@ -545,10 +547,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         name="Country",
         kind="reference",
         definition=COUNTRY_DEFINITION,
-        description="Countries — the code list customers and suppliers reference",
+        description="Countries — the reference data customers and suppliers point at",
         sources=COUNTRY_SOURCES,
         # None: a country that quarantines leaves every customer and supplier in it pointing
-        # at nothing, and the demo is about the links, not about a broken code list.
+        # at nothing, and the demo is about the links, not about broken reference data.
         defects=(),
     ),
     "contact": ModelSpec(
@@ -758,8 +760,8 @@ def make_products(rng: random.Random, count: int) -> list[dict[str, Any]]:
 
 
 def make_countries(rng: random.Random, count: int) -> list[dict[str, Any]]:
-    """The code list itself — fixed, whatever the count: a demo references every country its
-    addresses use, and a code list with gaps would leave references pointing at nothing."""
+    """Every country — fixed, whatever the count: a demo references every country its
+    addresses use, and a missing country would leave references pointing at nothing."""
     return [
         {"code": code, "name": name, "region": region, "currency": currency}
         for code, name, region, currency in COUNTRIES
@@ -1009,8 +1011,8 @@ def build_batches(
                 batch.clean += 1
 
             # The same entity entered twice in the same system under a second key — the
-            # intra-source duplicate Identity Resolution has to catch. A code list has no
-            # second key to enter a country under, so reference models have none.
+            # intra-source duplicate Identity Resolution has to catch. A country has no second
+            # key to be entered under, so reference models get no twins.
             if model_spec.kind == "entity" and rng.random() < duplicate_rate:
                 twin_key = spec.key_template.format(index=900000 + index + 1)
                 twin = render(entity, spec, twin_key, rng)
