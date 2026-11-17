@@ -2,15 +2,17 @@
 reviews, over a customer-shaped multi-file repository.
 
 The migration table is empty on `main` (the current schema is version 1 and nothing has been
-removed from it yet), so the migration every test here runs is SYNTHETIC — a 1 -> 2 step set
+removed from it yet), so the migration the version tests run is SYNTHETIC — a 1 -> 2 step set
 patched into the table, shaped like the first real ones will be: the `historized` attribute
-flag dropped, a key renamed, and a rewrite that reports what it cannot place.
+flag dropped, a key renamed, and a rewrite that reports what it cannot place. The renames
+(ADR 0146 §4) are not versions, and their tests run the real table.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -308,6 +310,257 @@ def test_dry_run_and_check_write_nothing(tmp_path: Path, announced: _schema.Migr
     assert not (root / "masterly.yaml").exists()
     assert main(["config", "migrate", str(root)]) == 0
     assert main(["config", "migrate", str(root), "--check"]) == 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Renames (ADR 0146 §4): the real table, applied at any declared version.
+
+_COUNTRIES = "# ISO 3166\nname: countries\ncodes:\n- SE\n- NO\n"
+_RULE = (
+    "name: country-known\n"
+    "definition:\n"
+    "  checks:\n"
+    "  - kind: not_null\n"
+    "    column: country\n"
+    "  - kind: in_reference\n"
+    "    column: country   # the column\n"
+    "    reference_list: countries   # the list it resolves in\n"
+    "    severity: error\n"
+)
+_RENAME_REPO = {
+    "masterly.yaml": "schema_version: 1\n",
+    "modules.yaml": "activated: []\n",
+    "README.md": "# Config\n",
+    "reference/countries.yaml": _COUNTRIES,
+    "rules/data-quality/country-known.yaml": _RULE,
+    "rules/data-quality/other.yaml": "name: other\ndefinition:\n  kind: not_null\n",
+}
+_BEFORE_CUTOVER = date(2027, 11, 15)
+_AFTER_CUTOVER = date(2027, 11, 16)
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    files = (p for p in sorted(root.rglob("*")) if p.is_file())
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in files}
+
+
+def _listing(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
+
+
+def test_the_rename_table_holds_the_servers_ids_and_routes_every_section() -> None:
+    """The ledger over the rename table: exactly the ids of the server's `evolution.RENAMES`
+    (backend 7f483dde11), each `<section>.<new name>` on a routed section, the cutover twelve
+    months after the announcement, and the one rename a working tree has nothing for marked
+    not applicable with its reason."""
+    assert {rule.id for rule in _schema.RENAMES} == {
+        "reference_lists.code_lists",
+        "reference_lists.code-lists",
+        "dq_rules.code_list",
+    }
+    sections = {section for _, section in _schema.PREFIX_TO_SECTION}
+    for rule in _schema.RENAMES:
+        assert rule.id == f"{rule.section}.{rule.new.rstrip('/')}", rule.id
+        assert rule.section in sections, rule.id
+        assert rule.announced == date(2026, 11, 15) and rule.cutover == date(2027, 11, 15)
+        assert (rule.not_applicable is not None) == (rule.shape == "section"), rule.id
+    by_id = {rule.id: rule for rule in _schema.RENAMES}
+    assert by_id["reference_lists.code_lists"].not_applicable
+    assert by_id["reference_lists.code-lists"].shape == "path_prefix"
+    assert by_id["dq_rules.code_list"].where == (("kind", "in_reference"),)
+
+
+def test_a_rename_moves_the_file_and_renames_the_key_and_a_second_run_has_nothing_to_do(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _write_repo(tmp_path, _RENAME_REPO)
+    before = _tree(root)
+
+    assert main(["config", "migrate", str(root)]) == 0
+    out = capsys.readouterr().out
+    after = _tree(root)
+
+    assert "reference/countries.yaml" not in after
+    assert after["code-lists/countries.yaml"] == before["reference/countries.yaml"]
+    assert not (root / "reference").exists()
+    rule = "rules/data-quality/country-known.yaml"
+    assert after[rule].decode() == _RULE.replace(
+        # the comment keeps its column, so the shorter key pads out to it
+        "    reference_list: countries   # the list",
+        "    code_list: countries        # the list",
+    )
+    untouched = set(before) - {"reference/countries.yaml", rule}
+    assert {path: after[path] for path in untouched} == {path: before[path] for path in untouched}
+
+    assert "reference_lists.code-lists" in out and "dq_rules.code_list" in out
+    assert "reference_lists.code_lists" not in out.replace("reference_lists.code-lists", "")
+    assert (
+        "diff --git a/reference/countries.yaml b/code-lists/countries.yaml\n"
+        "similarity index 100%\n"
+        "rename from reference/countries.yaml\nrename to code-lists/countries.yaml\n"
+    ) in out
+    assert "-    reference_list: countries" in out and "+    code_list: countries" in out
+    assert "masterly.yaml" not in out.replace("masterly.yaml declares", "")
+
+    assert main(["config", "migrate", str(root)]) == 0
+    assert "nothing to migrate" in capsys.readouterr().out
+    assert _tree(root) == after
+
+
+def test_a_move_keeps_the_bytes_of_a_file_with_windows_line_endings(tmp_path: Path) -> None:
+    root = _write_repo(tmp_path, {"masterly.yaml": "schema_version: 1\n"})
+    (root / "reference").mkdir()
+    data = b"name: countries\r\ncodes:\r\n- SE\r\n"
+    (root / "reference/countries.yaml").write_bytes(data)
+    assert main(["config", "migrate", str(root)]) == 0
+    assert (root / "code-lists/countries.yaml").read_bytes() == data
+
+
+def test_a_move_never_overwrites_an_existing_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    files = {**_RENAME_REPO, "code-lists/countries.yaml": "name: countries\ncodes: [DK]\n"}
+    root = _write_repo(tmp_path, files)
+    before = _tree(root)
+
+    assert main(["config", "migrate", str(root)]) == 0
+    out = capsys.readouterr().out
+
+    after = _tree(root)
+    assert after["code-lists/countries.yaml"] == before["code-lists/countries.yaml"]
+    assert after["reference/countries.yaml"] == before["reference/countries.yaml"]
+    assert "Not done mechanically" in out
+    assert "reference/countries.yaml: code-lists/countries.yaml already exists" in out
+    assert "lint error" in out
+
+
+def test_a_move_that_fails_while_writing_is_reported_not_raised(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_repo(tmp_path, _RENAME_REPO)
+    real_plan = _engine.plan
+
+    def plan_then_appear(*args: Any, **kwargs: Any) -> _engine.Plan:
+        planned = real_plan(*args, **kwargs)
+        (root / "code-lists").mkdir()
+        (root / "code-lists/countries.yaml").write_text("other\n", encoding="utf-8")
+        return planned
+
+    monkeypatch.setattr(_engine, "plan", plan_then_appear)
+    assert main(["config", "migrate", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "masterly config migrate:" in err and "appeared since the plan" in err
+    assert (root / "code-lists/countries.yaml").read_text(encoding="utf-8") == "other\n"
+    assert (root / "reference/countries.yaml").is_file()
+
+
+def test_a_dict_with_both_names_keeps_both_and_another_kind_keeps_the_old_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    text = (
+        "checks:\n"
+        "- kind: in_reference\n"
+        "  reference_list: countries\n"
+        "  code_list: countries\n"
+        "- kind: in_set\n"
+        "  reference_list: elsewhere\n"
+    )
+    root = _write_repo(
+        tmp_path,
+        {"masterly.yaml": "schema_version: 1\n", "rules/data-quality/both.yaml": text},
+    )
+    assert main(["config", "migrate", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert (root / "rules/data-quality/both.yaml").read_text() == text
+    assert "Not done mechanically" in out
+    assert "rules/data-quality/both.yaml: checks[0] carries both 'reference_list'" in out
+
+
+def test_dry_run_writes_no_move_and_no_edit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _write_repo(tmp_path, _RENAME_REPO)
+    before, listing = _tree(root), _listing(root)
+    assert main(["config", "migrate", str(root), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "rename to code-lists/countries.yaml" in out and "Dry run" in out
+    assert _tree(root) == before and _listing(root) == listing
+
+
+def test_check_fails_on_a_pending_rename_only_after_its_cutover(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _write_repo(tmp_path, _RENAME_REPO)
+    before, listing = _tree(root), _listing(root)
+    for day, code in ((_BEFORE_CUTOVER, 0), (_AFTER_CUTOVER, 1)):
+        assert main(["config", "migrate", str(root), "--check"], today=day) == code
+        out = capsys.readouterr().out
+        assert "reference_lists.code-lists" in out and "dq_rules.code_list" in out
+        assert _tree(root) == before and _listing(root) == listing
+    assert main(["config", "migrate", str(root)]) == 0
+    assert main(["config", "migrate", str(root), "--check"], today=_AFTER_CUTOVER) == 0
+
+
+def test_a_pending_migration_still_fails_check_before_the_cutover(
+    tmp_path: Path, announced: _schema.Migration
+) -> None:
+    root = _write_repo(tmp_path, {**_FILES, **_RENAME_REPO, "masterly.yaml": "schema_version: 1\n"})
+    assert main(["config", "migrate", str(root), "--check"], today=_BEFORE_CUTOVER) == 1
+
+
+def test_a_field_rename_builds_on_a_migration_edit_to_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration = _schema.Migration(
+        to_version=2,
+        steps=(
+            _schema.DropKey(
+                id="dq_rules.checks.note",
+                section="dq_rules",
+                path="checks[].note",
+                why="the note is retired",
+            ),
+        ),
+    )
+    monkeypatch.setattr(_schema, "MIGRATIONS", (migration,))
+    monkeypatch.setattr(_schema, "CURRENT_SCHEMA_VERSION", 2)
+    monkeypatch.setattr(_engine, "CURRENT_SCHEMA_VERSION", 2)
+    path = "rules/data-quality/both-edits.yaml"
+    root = _write_repo(
+        tmp_path,
+        {
+            "masterly.yaml": "schema_version: 1\n",
+            path: "checks:\n- kind: in_reference\n  reference_list: countries\n  note: old\n",
+        },
+    )
+    assert main(["config", "migrate", str(root)]) == 0
+    assert (root / path).read_text() == "checks:\n- kind: in_reference\n  code_list: countries\n"
+
+
+def test_a_rename_on_reference_lists_visits_both_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rule = _schema.RenameRule(
+        id="reference_lists.label",
+        section="reference_lists",
+        shape="field",
+        old="title",
+        new="label",
+        announced=date(2026, 11, 15),
+        why="test",
+    )
+    monkeypatch.setattr(_schema, "RENAMES", (rule,))
+    root = _write_repo(
+        tmp_path,
+        {
+            "masterly.yaml": "schema_version: 1\n",
+            "code-lists/a.yaml": "title: A\n",
+            "reference/b.yaml": "title: B\n",
+        },
+    )
+    assert main(["config", "migrate", str(root)]) == 0
+    assert (root / "code-lists/a.yaml").read_text() == "label: A\n"
+    assert (root / "reference/b.yaml").read_text() == "label: B\n"
 
 
 def test_a_repository_without_a_declaration_gains_one_at_the_current_version(

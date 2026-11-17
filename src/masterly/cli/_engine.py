@@ -23,6 +23,7 @@ import difflib
 import io
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from masterly.cli._schema import (
     DropKey,
     Migration,
     RenameKey,
+    RenameRule,
     Rewrite,
 )
 
@@ -46,15 +48,45 @@ class MigrateError(Exception):
 @dataclass(frozen=True)
 class Change:
     """One file the migration rewrites: its path, the text before and after, and the notes the
-    steps left about what they could not do mechanically."""
+    steps left about what they could not do mechanically.
+
+    A rename can move the file: ``moved_from`` is then the path it leaves, ``path`` is where it
+    lands, and ``before`` is its text at the old path. ``renames`` are the ids of the renames
+    (not version steps) behind the change, so a pending rename can be told from a pending
+    migration."""
 
     path: str
     before: str | None
     after: str
     notes: tuple[str, ...] = ()
+    moved_from: str | None = None
+    renames: tuple[str, ...] = ()
+
+    @property
+    def is_edit(self) -> bool:
+        """Whether applying it changes the working tree; a note on its own does not."""
+        return self.moved_from is not None or self.after != self.before
 
     def unified_diff(self) -> str:
-        """The change as ``git diff`` would show it, so the terminal and the commit agree."""
+        """The change as ``git diff`` would show it, so the terminal and the commit agree. A
+        move is git's rename: the header, and a hunk only if the text changed with it."""
+        if self.moved_from is not None:
+            same = self.after == self.before
+            header = (
+                f"diff --git a/{self.moved_from} b/{self.path}\n"
+                f"similarity index {100 if same else 99}%\n"
+                f"rename from {self.moved_from}\nrename to {self.path}\n"
+            )
+            if same:
+                return header
+            return header + "".join(
+                difflib.unified_diff(
+                    (self.before or "").splitlines(keepends=True),
+                    self.after.splitlines(keepends=True),
+                    fromfile=f"a/{self.moved_from}",
+                    tofile=f"b/{self.path}",
+                )
+            )
         before = self.before.splitlines(keepends=True) if self.before is not None else []
         lines = difflib.unified_diff(
             before,
@@ -78,6 +110,18 @@ class Plan:
     @property
     def is_noop(self) -> bool:
         return not self.changes
+
+    def pending_renames(self) -> list[RenameRule]:
+        """The renames behind the plan's changes, in the table's order."""
+        ids = {rename for change in self.changes for rename in change.renames}
+        return [rule for rule in _schema.RENAMES if rule.id in ids]
+
+    def blocks_check(self, today: date) -> bool:
+        """Whether ``--check`` should fail: any pending migration, or a rename once its cutover
+        has passed. Before it the server only warns, so a rename is listed and does not fail."""
+        if any(not change.renames for change in self.changes):
+            return True
+        return any(today > rule.cutover for rule in self.pending_renames())
 
 
 def plan(root: Path, *, to_version: int | None = None) -> Plan:
@@ -120,15 +164,43 @@ def plan(root: Path, *, to_version: int | None = None) -> Plan:
         after, notes = _apply_steps(before, steps, yaml, relative)
         if after != before or notes:
             changes.append(Change(relative, before, after, tuple(notes)))
+    changes.extend(_rename_changes(root, documents, changes, yaml))
     if target != from_version or not declared:
         changes.append(_declaration_change(root, target, yaml))
     return Plan(root, from_version, target, declared, tuple(changes))
 
 
 def write(plan_: Plan) -> None:
-    """Perform the plan: write every changed file. The caller reviews and commits."""
+    """Perform the plan: write every changed file and make every move. The caller reviews and
+    commits. A move creates its target exclusively and deletes the source only once the target
+    reads back the same, so nothing is overwritten and nothing is lost."""
     for change in plan_.changes:
-        (plan_.root / change.path).write_text(change.after, encoding="utf-8")
+        target = plan_.root / change.path
+        if change.moved_from is None:
+            if change.is_edit:
+                target.write_text(change.after, encoding="utf-8")
+            continue
+        source = plan_.root / change.moved_from
+        if change.after == change.before:
+            data = source.read_bytes()  # byte-identical, whatever its line endings
+        else:
+            data = change.after.encode("utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with target.open("xb") as handle:
+                handle.write(data)
+        except FileExistsError as exc:
+            raise MigrateError(f"{change.path} appeared since the plan; not moved") from exc
+        if target.read_bytes() != data:  # pragma: no cover - a disk that reads back differently
+            raise MigrateError(f"{change.path} did not read back as written; kept the source")
+        source.unlink()
+        parent = source.parent
+        while parent != plan_.root:  # leave no empty directory where the files were
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
 
 
 def describe(plan_: Plan, migrations: list[Migration] | None = None) -> str:
@@ -139,11 +211,13 @@ def describe(plan_: Plan, migrations: list[Migration] | None = None) -> str:
             f"{SCHEMA_VERSION_FILE} declares schema version {plan_.from_version}; "
             "nothing to migrate."
         )
-    moved = (
-        f"schema version {plan_.from_version} -> {plan_.to_version}"
-        if plan_.to_version != plan_.from_version
-        else f"schema version {plan_.to_version}, now declared in {SCHEMA_VERSION_FILE}"
-    )
+    declares = any(change.path == SCHEMA_VERSION_FILE for change in plan_.changes)
+    if plan_.to_version != plan_.from_version:
+        moved = f"schema version {plan_.from_version} -> {plan_.to_version}"
+    elif declares:
+        moved = f"schema version {plan_.to_version}, now declared in {SCHEMA_VERSION_FILE}"
+    else:
+        moved = f"schema version {plan_.to_version}"
     lines = [f"{moved}: {len(plan_.changes)} file(s) changed"]
     steps = [
         step
@@ -152,6 +226,11 @@ def describe(plan_: Plan, migrations: list[Migration] | None = None) -> str:
     ]
     for step in steps:
         lines.append(f"  - {step.id}: {step.why}")
+    for rule in plan_.pending_renames():
+        lines.append(
+            f"  - {rule.id}: {rule.why} "
+            f"(export writes the new name after {rule.cutover.isoformat()})"
+        )
     notes = [(change.path, note) for change in plan_.changes for note in change.notes]
     if notes:
         lines.append("Not done mechanically — review by hand:")
@@ -230,6 +309,99 @@ def _documents(root: Path) -> list[tuple[str, str]]:
     return sorted(set(found))
 
 
+def _rename_changes(
+    root: Path, documents: list[tuple[str, str]], made: list[Change], yaml: Any
+) -> list[Change]:
+    """The changes the renames make, after the migrations'. A file a migration step already
+    rewrote is carried into its move, not moved from the text on disk."""
+    changes: list[Change] = []
+    for rule in _schema.RENAMES:
+        if rule.shape == "path_prefix":
+            changes.extend(_moves(root, rule, documents, made))
+        elif rule.shape == "field":
+            for relative, section in documents:
+                if section == rule.section:
+                    earlier = next((c for c in made if c.path == relative), None)
+                    change = _rename_field_in(root, relative, rule, yaml, earlier)
+                    if change is not None:
+                        if earlier is not None:
+                            made.remove(earlier)
+                        changes.append(change)
+        # `section` renames a bundle key; a working tree has none (see its `not_applicable`).
+    return changes
+
+
+def _moves(
+    root: Path, rule: RenameRule, documents: list[tuple[str, str]], made: list[Change]
+) -> list[Change]:
+    moves: list[Change] = []
+    for relative, section in documents:
+        if section != rule.section or not relative.startswith(rule.old):
+            continue
+        target = rule.new + relative[len(rule.old) :]
+        before = (root / relative).read_bytes().decode("utf-8", errors="replace")
+        if (root / target).exists():
+            note = (
+                f"{target} already exists, so this file was not moved and nothing was "
+                "overwritten; the server reads a list under both directories as a lint "
+                "error — merge the two by hand and delete one"
+            )
+            moves.append(Change(relative, before, before, (note,), renames=(rule.id,)))
+            continue
+        earlier = next((c for c in made if c.path == relative), None)
+        if earlier is not None:
+            made.remove(earlier)
+        after, notes = (earlier.after, earlier.notes) if earlier is not None else (before, ())
+        moves.append(Change(target, before, after, notes, moved_from=relative, renames=(rule.id,)))
+    return moves
+
+
+def _rename_field_in(
+    root: Path, relative: str, rule: RenameRule, yaml: Any, earlier: Change | None = None
+) -> Change | None:
+    """The field rename of one file. A migration's earlier change to it is carried on: the
+    rename starts from that text, and the two edits land as one change."""
+    text = earlier.after if earlier is not None else (root / relative).read_text(encoding="utf-8")
+    if rule.old not in text:
+        return None  # the file cannot carry the field: leave it unread
+    try:
+        document = yaml.load(text)
+    except Exception as exc:  # noqa: BLE001 - every parser fault reads the same to the user
+        raise MigrateError(f"{relative} does not parse as YAML: {exc}") from exc
+    notes: list[str] = []
+    changed = _rename_fields(document, rule, "", notes)
+    if not changed and not notes:
+        return None
+    after = _dump(document, yaml, text) if changed else text
+    if earlier is None:
+        return Change(relative, text, after, tuple(notes), renames=(rule.id,))
+    return Change(relative, earlier.before, after, (*earlier.notes, *notes), renames=(rule.id,))
+
+
+def _rename_fields(value: Any, rule: RenameRule, at: str, notes: list[str]) -> bool:
+    """Rename ``rule.old`` to ``rule.new`` in every dict under ``value`` that carries each
+    ``where`` pair, at any depth through dicts and lists, as the server walks it. A dict that
+    already has both names keeps both, and a note says where."""
+    changed = False
+    if isinstance(value, dict):
+        if all(value.get(key) == expected for key, expected in rule.where) and rule.old in value:
+            if rule.new in value:
+                notes.append(
+                    f"{at or '<document>'} carries both '{rule.old}' and '{rule.new}'; both "
+                    f"kept — drop '{rule.old}' by hand"
+                )
+            else:
+                _rename_in_place(value, rule.old, rule.new)
+                changed = True
+        for key, inner in list(value.items()):
+            there = f"{at}.{key}" if at else str(key)
+            changed = _rename_fields(inner, rule, there, notes) or changed
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            changed = _rename_fields(item, rule, f"{at}[{index}]", notes) or changed
+    return changed
+
+
 def _apply_steps(
     text: str, steps: list[_schema.Step], yaml: Any, path: str
 ) -> tuple[str, list[str]]:
@@ -269,6 +441,9 @@ def _rename_in_place(holder: Any, key: str, to: str) -> None:
         position = list(holder.keys()).index(key)
         value = holder.pop(key)
         holder.insert(position, to, value)
+        comments = getattr(getattr(holder, "ca", None), "items", None)
+        if comments is not None and key in comments:
+            comments[to] = comments.pop(key)  # the trailing comment stays on the renamed line
     else:  # pragma: no cover - a plain dict never reaches here from the round-trip loader
         holder[to] = holder.pop(key)
 
