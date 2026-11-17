@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from masterly import __version__
@@ -63,21 +64,26 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--check",
         action="store_true",
-        help="write nothing; exit 1 when a migration is pending (for CI)",
+        help=(
+            "write nothing; exit 1 when a migration is pending (for CI), or a rename after its "
+            "cutover; a rename before it is listed and exits 0"
+        ),
     )
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, today: date | None = None) -> int:
+    """``today`` is the day ``--check`` judges a rename's cutover against (UTC today by
+    default); it is a parameter so the cutover can be tested."""
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command != "config" or args.config_command != "migrate":
         parser.print_help()
         return 2
-    return _run_migrate(args)
+    return _run_migrate(args, today or datetime.now(timezone.utc).date())
 
 
-def _run_migrate(args: argparse.Namespace) -> int:
+def _run_migrate(args: argparse.Namespace, today: date) -> int:
     from masterly.cli import _engine as engine
 
     try:
@@ -91,8 +97,14 @@ def _run_migrate(args: argparse.Namespace) -> int:
         engine.write(plan)
     summary = engine.describe(plan)
     if args.check and not plan.is_noop:
-        print(f"{summary}\nPending: run `masterly config migrate` and commit the result.")
-        return 1
+        if plan.blocks_check(today):
+            print(f"{summary}\nPending: run `masterly config migrate` and commit the result.")
+            return 1
+        print(
+            f"{summary}\nPending renames are not an error before their cutover: the old names "
+            "are still read. Run `masterly config migrate` to make the change."
+        )
+        return 0
     if args.dry_run and not plan.is_noop:
         summary += "\nDry run: nothing was written."
     print(summary)

@@ -20,7 +20,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from datetime import date
+from typing import Any, Literal
 
 #: The newest schema version this client can migrate a repository to. Moves together with the
 #: table below, and never ahead of the server release that validates that version.
@@ -180,6 +181,82 @@ class Migration:
 #: fields the product retired in place ahead of this command (``historized``,
 #: ``definition.relationships``).
 MIGRATIONS: tuple[Migration, ...] = ()
+
+
+# ---------------------------------------------------------------------------------------------
+# Renames. A rename is not a schema version: both names stay valid and the server only warns
+# on the old one until a dated cutover (ADR 0082). So it lives in its own table, applies to a
+# repository at any declared version, and never moves the version or touches ``masterly.yaml``.
+
+#: The configuration format's announcement window: twelve months, the API's.
+RENAME_WINDOW_MONTHS = 12
+
+_CODE_LISTS_ANNOUNCED = date(2026, 11, 15)
+
+
+@dataclass(frozen=True)
+class RenameRule:
+    """One announced rename, under the id the server's linter ends its warning with.
+
+    ``shape`` is what the old name is: ``section`` (the bundle section's own key),
+    ``path_prefix`` (the repository directory the section's files live under) or ``field`` (a
+    key inside a record, in any dict that carries every ``where`` pair, at any depth)."""
+
+    id: str
+    section: str
+    shape: Literal["section", "path_prefix", "field"]
+    old: str
+    new: str
+    announced: date
+    why: str
+    where: tuple[tuple[str, str], ...] = ()
+    #: Why a working tree has nothing for the command to edit, when that is so.
+    not_applicable: str | None = None
+
+    @property
+    def cutover(self) -> date:
+        """The last day export writes the old name; from the day after, it writes the new one."""
+        month = self.announced.month - 1 + RENAME_WINDOW_MONTHS
+        return self.announced.replace(year=self.announced.year + month // 12, month=month % 12 + 1)
+
+
+#: Every rename the server announces (``evolution.RENAMES`` in ``masterly-application-backend``,
+#: as of its commit 7f483dde11), under the same ids. ``tests/test_cli_migrate.py`` holds the id
+#: set to the server's.
+RENAMES: tuple[RenameRule, ...] = (
+    RenameRule(
+        id="reference_lists.code_lists",
+        section="reference_lists",
+        shape="section",
+        old="reference_lists",
+        new="code_lists",
+        announced=_CODE_LISTS_ANNOUNCED,
+        why="the bundle section is named for what it holds",
+        not_applicable=(
+            "it renames a bundle section's key, and a GitOps working tree has no such key — "
+            "its sections are directories, which reference_lists.code-lists moves"
+        ),
+    ),
+    RenameRule(
+        id="reference_lists.code-lists",
+        section="reference_lists",
+        shape="path_prefix",
+        old="reference/",
+        new="code-lists/",
+        announced=_CODE_LISTS_ANNOUNCED,
+        why="the reference list is the code list; its files move to code-lists/",
+    ),
+    RenameRule(
+        id="dq_rules.code_list",
+        section="dq_rules",
+        shape="field",
+        old="reference_list",
+        new="code_list",
+        announced=_CODE_LISTS_ANNOUNCED,
+        why="an in_reference rule names its code list",
+        where=(("kind", "in_reference"),),
+    ),
+)
 
 
 def migrations_between(from_version: int, to_version: int) -> list[Migration]:
