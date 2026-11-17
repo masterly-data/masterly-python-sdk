@@ -94,7 +94,15 @@ def _run_migrate(args: argparse.Namespace, today: date) -> int:
     for change in plan.changes:
         sys.stdout.write(change.unified_diff())
     if not plan.is_noop and not (args.dry_run or args.check):
-        engine.write(plan)
+        try:
+            engine.write(plan)
+        except engine.MigrateError as exc:
+            print(
+                f"masterly config migrate: {exc}; earlier changes in the plan may already be "
+                "written, so check `git status` before running it again",
+                file=sys.stderr,
+            )
+            return 2
     summary = engine.describe(plan)
     if args.check and not plan.is_noop:
         if plan.blocks_check(today):

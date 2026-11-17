@@ -434,6 +434,26 @@ def test_a_move_never_overwrites_an_existing_target(
     assert "lint error" in out
 
 
+def test_a_move_that_fails_while_writing_is_reported_not_raised(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _write_repo(tmp_path, _RENAME_REPO)
+    real_plan = _engine.plan
+
+    def plan_then_appear(*args: Any, **kwargs: Any) -> _engine.Plan:
+        planned = real_plan(*args, **kwargs)
+        (root / "code-lists").mkdir()
+        (root / "code-lists/countries.yaml").write_text("other\n", encoding="utf-8")
+        return planned
+
+    monkeypatch.setattr(_engine, "plan", plan_then_appear)
+    assert main(["config", "migrate", str(root)]) == 2
+    err = capsys.readouterr().err
+    assert "masterly config migrate:" in err and "appeared since the plan" in err
+    assert (root / "code-lists/countries.yaml").read_text(encoding="utf-8") == "other\n"
+    assert (root / "reference/countries.yaml").is_file()
+
+
 def test_a_dict_with_both_names_keeps_both_and_another_kind_keeps_the_old_one(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
