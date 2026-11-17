@@ -488,6 +488,35 @@ def test_a_pending_migration_still_fails_check_before_the_cutover(
     assert main(["config", "migrate", str(root), "--check"], today=_BEFORE_CUTOVER) == 1
 
 
+def test_a_field_rename_builds_on_a_migration_edit_to_the_same_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    migration = _schema.Migration(
+        to_version=2,
+        steps=(
+            _schema.DropKey(
+                id="dq_rules.checks.note",
+                section="dq_rules",
+                path="checks[].note",
+                why="the note is retired",
+            ),
+        ),
+    )
+    monkeypatch.setattr(_schema, "MIGRATIONS", (migration,))
+    monkeypatch.setattr(_schema, "CURRENT_SCHEMA_VERSION", 2)
+    monkeypatch.setattr(_engine, "CURRENT_SCHEMA_VERSION", 2)
+    path = "rules/data-quality/both-edits.yaml"
+    root = _write_repo(
+        tmp_path,
+        {
+            "masterly.yaml": "schema_version: 1\n",
+            path: "checks:\n- kind: in_reference\n  reference_list: countries\n  note: old\n",
+        },
+    )
+    assert main(["config", "migrate", str(root)]) == 0
+    assert (root / path).read_text() == "checks:\n- kind: in_reference\n  code_list: countries\n"
+
+
 def test_a_rename_on_reference_lists_visits_both_directories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

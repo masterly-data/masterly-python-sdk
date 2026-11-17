@@ -321,8 +321,11 @@ def _rename_changes(
         elif rule.shape == "field":
             for relative, section in documents:
                 if section == rule.section:
-                    change = _rename_field_in(root, relative, rule, yaml)
+                    earlier = next((c for c in made if c.path == relative), None)
+                    change = _rename_field_in(root, relative, rule, yaml, earlier)
                     if change is not None:
+                        if earlier is not None:
+                            made.remove(earlier)
                         changes.append(change)
         # `section` renames a bundle key; a working tree has none (see its `not_applicable`).
     return changes
@@ -353,8 +356,12 @@ def _moves(
     return moves
 
 
-def _rename_field_in(root: Path, relative: str, rule: RenameRule, yaml: Any) -> Change | None:
-    text = (root / relative).read_text(encoding="utf-8")
+def _rename_field_in(
+    root: Path, relative: str, rule: RenameRule, yaml: Any, earlier: Change | None = None
+) -> Change | None:
+    """The field rename of one file. A migration's earlier change to it is carried on: the
+    rename starts from that text, and the two edits land as one change."""
+    text = earlier.after if earlier is not None else (root / relative).read_text(encoding="utf-8")
     if rule.old not in text:
         return None  # the file cannot carry the field: leave it unread
     try:
@@ -366,7 +373,9 @@ def _rename_field_in(root: Path, relative: str, rule: RenameRule, yaml: Any) -> 
     if not changed and not notes:
         return None
     after = _dump(document, yaml, text) if changed else text
-    return Change(relative, text, after, tuple(notes), renames=(rule.id,))
+    if earlier is None:
+        return Change(relative, text, after, tuple(notes), renames=(rule.id,))
+    return Change(relative, earlier.before, after, (*earlier.notes, *notes), renames=(rule.id,))
 
 
 def _rename_fields(value: Any, rule: RenameRule, at: str, notes: list[str]) -> bool:
