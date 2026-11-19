@@ -663,10 +663,7 @@ def test_the_console_script_is_installed_and_says_which_extra_it_needs() -> None
 
 def _link(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        link.symlink_to(target, target_is_directory=target.is_dir())
-    except (OSError, NotImplementedError):  # pragma: no cover - Windows without the privilege
-        pytest.skip("symbolic links are not available here")
+    link.symlink_to(target, target_is_directory=target.is_dir())
 
 
 def _repo_and_outside(tmp_path: Path) -> tuple[Path, Path]:
