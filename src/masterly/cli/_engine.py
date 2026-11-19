@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import io
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -106,6 +107,9 @@ class Plan:
     to_version: int
     declared: bool
     changes: tuple[Change, ...] = field(default_factory=tuple)
+    skipped: tuple[str, ...] = ()
+    """Symbolic links under the layout's directories, relative to ``root``. They are neither
+    read nor written: a link can lead out of the repository."""
 
     @property
     def is_noop(self) -> bool:
@@ -131,6 +135,7 @@ def plan(root: Path, *, to_version: int | None = None) -> Plan:
     root = root.resolve()
     if not root.is_dir():
         raise MigrateError(f"{root} is not a directory")
+    _guard(root, root / SCHEMA_VERSION_FILE)
     declared_value, declared = _declared_version(root, yaml)
     from_version = _resolve_version(declared_value)
     target = CURRENT_SCHEMA_VERSION if to_version is None else to_version
@@ -144,8 +149,8 @@ def plan(root: Path, *, to_version: int | None = None) -> Plan:
             f"the repository is on schema version {from_version} and a migration only moves "
             f"forward; schema version {target} is behind it"
         )
-    documents = _documents(root)
-    if not documents and not declared and not (root / "modules.yaml").is_file():
+    documents, skipped = _scan(root)
+    if not documents and not skipped and not declared and not (root / "modules.yaml").is_file():
         raise MigrateError(
             f"{root} does not look like a Masterly configuration repository: no "
             f"{SCHEMA_VERSION_FILE}, no modules.yaml and no configuration directory"
@@ -167,25 +172,36 @@ def plan(root: Path, *, to_version: int | None = None) -> Plan:
     changes.extend(_rename_changes(root, documents, changes, yaml))
     if target != from_version or not declared:
         changes.append(_declaration_change(root, target, yaml))
-    return Plan(root, from_version, target, declared, tuple(changes))
+    return Plan(root, from_version, target, declared, tuple(changes), skipped)
 
 
 def write(plan_: Plan) -> None:
     """Perform the plan: write every changed file and make every move. The caller reviews and
     commits. A move creates its target exclusively and deletes the source only once the target
-    reads back the same, so nothing is overwritten and nothing is lost."""
+    reads back the same, so nothing is overwritten and nothing is lost. Every path is checked
+    again right before it is touched: a file swapped for a symbolic link since the plan is
+    refused."""
+    root = plan_.root
+    for change in plan_.changes:  # refuse before the first write, not halfway through
+        _guard(root, root / change.path)
+        if change.moved_from is not None:
+            _guard(root, root / change.moved_from)
     for change in plan_.changes:
-        target = plan_.root / change.path
+        target = root / change.path
         if change.moved_from is None:
             if change.is_edit:
+                _guard(root, target)
                 target.write_text(change.after, encoding="utf-8")
             continue
-        source = plan_.root / change.moved_from
+        source = root / change.moved_from
+        _guard(root, source)
         if change.after == change.before:
             data = source.read_bytes()  # byte-identical, whatever its line endings
         else:
             data = change.after.encode("utf-8")
+        _guard(root, target)
         target.parent.mkdir(parents=True, exist_ok=True)
+        _guard(root, target)
         try:
             with target.open("xb") as handle:
                 handle.write(data)
@@ -193,9 +209,10 @@ def write(plan_: Plan) -> None:
             raise MigrateError(f"{change.path} appeared since the plan; not moved") from exc
         if target.read_bytes() != data:  # pragma: no cover - a disk that reads back differently
             raise MigrateError(f"{change.path} did not read back as written; kept the source")
+        _guard(root, source)
         source.unlink()
         parent = source.parent
-        while parent != plan_.root:  # leave no empty directory where the files were
+        while parent != root:  # leave no empty directory where the files were
             try:
                 parent.rmdir()
             except OSError:
@@ -206,10 +223,11 @@ def write(plan_: Plan) -> None:
 def describe(plan_: Plan, migrations: list[Migration] | None = None) -> str:
     """The summary printed under the diff: what moved, what each step was for, and every note
     a step left about something it did not do."""
+    skipped = _describe_skipped(plan_)
     if plan_.is_noop:
         return (
             f"{SCHEMA_VERSION_FILE} declares schema version {plan_.from_version}; "
-            "nothing to migrate."
+            "nothing to migrate." + skipped
         )
     declares = any(change.path == SCHEMA_VERSION_FILE for change in plan_.changes)
     if plan_.to_version != plan_.from_version:
@@ -235,7 +253,15 @@ def describe(plan_: Plan, migrations: list[Migration] | None = None) -> str:
     if notes:
         lines.append("Not done mechanically — review by hand:")
         lines.extend(f"  {path}: {note}" for path, note in notes)
-    return "\n".join(lines)
+    return "\n".join(lines) + skipped
+
+
+def _describe_skipped(plan_: Plan) -> str:
+    if not plan_.skipped:
+        return ""
+    lines = ["Skipped — a symbolic link, so the migration neither reads nor writes it:"]
+    lines.extend(f"  {path}" for path in plan_.skipped)
+    return "\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -292,21 +318,61 @@ def _resolve_version(declared: Any) -> int:
     return declared
 
 
+def _guard(root: Path, path: Path) -> None:
+    """Refuse a ``path`` the migration must not read or write: a symbolic link, one with a link
+    between it and ``root``, or one that resolves outside ``root``. Components that do not
+    exist yet are fine. Called again right before each change, since a plan can go stale."""
+    relative = path.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise MigrateError(
+                f"{relative.as_posix()} is, or sits behind, a symbolic link; "
+                "the migration does not read or write through links"
+            )
+    if not path.resolve().is_relative_to(root):
+        raise MigrateError(f"{relative.as_posix()} resolves outside the repository")
+
+
 def _documents(root: Path) -> list[tuple[str, str]]:
-    """Every configuration document under ``root`` as (relative path, section), sorted. Only
-    the layout's own directories are walked, so the customer's other files are never read."""
+    """The documents of ``_scan``, without the links it skipped."""
+    return _scan(root)[0]
+
+
+def _scan(root: Path) -> tuple[list[tuple[str, str]], tuple[str, ...]]:
+    """Every configuration document under ``root`` as (relative path, section), sorted, and the
+    symbolic links skipped, sorted. Only the layout's own directories are walked, so the
+    customer's other files are never read, and a link is never followed: it can lead out of
+    the repository."""
     found: list[tuple[str, str]] = []
+    skipped: set[str] = set()
     for prefix, section in _schema.PREFIX_TO_SECTION:
         directory = root / prefix.rstrip("/")
+        link = next(
+            (p for p in (directory, *directory.parents) if p != root and p.is_symlink()), None
+        )
+        if link is not None:  # the directory, or a parent of it, is a link
+            skipped.add(link.relative_to(root).as_posix())
+            continue
         if not directory.is_dir():
             continue
-        for file in sorted(directory.rglob("*")):
-            if not file.is_file():
-                continue
-            relative = file.relative_to(root).as_posix()
-            if _schema.section_of(relative) == section:
-                found.append((relative, section))
-    return sorted(set(found))
+        for current, dirnames, filenames in os.walk(directory, followlinks=False):
+            here = Path(current)
+            for name in list(dirnames):
+                if (here / name).is_symlink():
+                    skipped.add((here / name).relative_to(root).as_posix())
+                    dirnames.remove(name)
+            for name in filenames:
+                file = here / name
+                relative = file.relative_to(root).as_posix()
+                if _schema.section_of(relative) != section:
+                    continue
+                if file.is_symlink() or not file.resolve().is_relative_to(root):
+                    skipped.add(relative)
+                else:
+                    found.append((relative, section))
+    return sorted(set(found)), tuple(sorted(skipped))
 
 
 def _rename_changes(
