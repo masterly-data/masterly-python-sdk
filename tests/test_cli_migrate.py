@@ -654,3 +654,161 @@ def test_the_console_script_is_installed_and_says_which_extra_it_needs() -> None
     assert main([]) == 2
     with pytest.raises(SystemExit):
         main(["config", "migrate", "--help"])
+
+
+# ---------------------------------------------------------------------------------------------
+# Symbolic links: never read, written, created through or unlinked; a swap after the plan is
+# refused. The "outside" files stand for anything the operator can write.
+
+
+def _link(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except (OSError, NotImplementedError):  # pragma: no cover - Windows without the privilege
+        pytest.skip("symbolic links are not available here")
+
+
+def _repo_and_outside(tmp_path: Path) -> tuple[Path, Path]:
+    root = _write_repo(tmp_path / "repo", _RENAME_REPO)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return root, outside
+
+
+def test_a_symlinked_file_is_skipped_listed_and_never_written(tmp_path: Path) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    victim = outside / "rule.yaml"
+    victim.write_text(_RULE, encoding="utf-8")
+    _link(root / "rules/data-quality/link.yaml", victim)
+
+    planned = _engine.plan(root)
+    assert planned.skipped == ("rules/data-quality/link.yaml",)
+    assert all(change.path != "rules/data-quality/link.yaml" for change in planned.changes)
+    _engine.write(planned)
+
+    assert victim.read_text(encoding="utf-8") == _RULE
+    assert (root / "rules/data-quality/country-known.yaml").read_text().count("code_list:") == 1
+
+
+def test_describe_and_dry_run_name_each_skipped_link_even_when_nothing_else_changes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _write_repo(tmp_path / "repo", {"masterly.yaml": "schema_version: 1\n"})
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("name: x\n", encoding="utf-8")
+    _link(root / "data-models/b.yaml", outside)
+    _link(root / "data-models/a.yaml", outside)
+
+    summary = _engine.describe(_engine.plan(root))
+    assert "nothing to migrate" in summary
+    assert summary.index("data-models/a.yaml") < summary.index("data-models/b.yaml")
+    assert "symbolic link" in summary
+
+    assert main(["config", "migrate", str(root), "--dry-run"]) == 0
+    assert "data-models/a.yaml" in capsys.readouterr().out
+    assert main(["config", "migrate", str(root), "--check"]) == 0
+    assert "data-models/b.yaml" in capsys.readouterr().out
+    assert _engine.plan(root).is_noop
+
+
+def test_symlinked_directories_are_not_walked(tmp_path: Path) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    (outside / "sub").mkdir()
+    victim = outside / "sub/rule.yaml"
+    victim.write_text(_RULE, encoding="utf-8")
+    _link(root / "rules/data-quality/nested", outside / "sub")
+    _link(root / "data-models", outside / "sub")  # a layout directory that is itself a link
+
+    planned = _engine.plan(root)
+    assert planned.skipped == ("data-models", "rules/data-quality/nested")
+    assert not any("nested" in change.path for change in planned.changes)
+    _engine.write(planned)
+
+    assert victim.read_text(encoding="utf-8") == _RULE
+
+
+def test_a_symlinked_parent_of_a_layout_directory_is_skipped(tmp_path: Path) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    (outside / "data-quality").mkdir()
+    (outside / "data-quality/x.yaml").write_text(_RULE, encoding="utf-8")
+    (root / "rules/data-quality/country-known.yaml").unlink()
+    (root / "rules/data-quality/other.yaml").unlink()
+    (root / "rules/data-quality").rmdir()
+    (root / "rules").rmdir()
+    _link(root / "rules", outside)
+
+    planned = _engine.plan(root)
+    assert planned.skipped == ("rules",)
+    _engine.write(planned)
+    assert (outside / "data-quality/x.yaml").read_text(encoding="utf-8") == _RULE
+
+
+def test_a_move_through_a_symlinked_directory_creates_and_removes_nothing(
+    tmp_path: Path,
+) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    _link(root / "code-lists", outside)
+
+    planned = _engine.plan(root)
+    with pytest.raises(_engine.MigrateError, match="code-lists/countries.yaml"):
+        _engine.write(planned)
+
+    assert list(outside.iterdir()) == []
+    assert (root / "reference/countries.yaml").read_text(encoding="utf-8") == _COUNTRIES
+
+
+def test_a_symlinked_declaration_is_refused_and_left_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _write_repo(tmp_path / "repo", {"modules.yaml": "activated: []\n"})
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("schema_version: 1\n", encoding="utf-8")
+    _link(root / "masterly.yaml", outside)
+
+    with pytest.raises(_engine.MigrateError, match="masterly.yaml"):
+        _engine.plan(root)
+    assert main(["config", "migrate", str(root)]) == 2
+    assert "masterly.yaml" in capsys.readouterr().err
+    assert outside.read_text(encoding="utf-8") == "schema_version: 1\n"
+
+
+def test_an_edit_target_swapped_for_a_link_after_the_plan_is_refused(tmp_path: Path) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    victim = outside / "secret.yaml"
+    victim.write_text("keep: me\n", encoding="utf-8")
+    planned = _engine.plan(root)
+
+    rule = root / "rules/data-quality/country-known.yaml"
+    rule.unlink()
+    _link(rule, victim)
+
+    with pytest.raises(_engine.MigrateError, match="rules/data-quality/country-known.yaml"):
+        _engine.write(planned)
+    assert victim.read_text(encoding="utf-8") == "keep: me\n"
+
+
+def test_a_move_source_or_target_swapped_for_a_link_after_the_plan_is_refused(
+    tmp_path: Path,
+) -> None:
+    root, outside = _repo_and_outside(tmp_path)
+    victim = outside / "secret.yaml"
+    victim.write_text("keep: me\n", encoding="utf-8")
+    planned = _engine.plan(root)
+
+    source = root / "reference/countries.yaml"
+    source.unlink()
+    _link(source, victim)
+    with pytest.raises(_engine.MigrateError, match="reference/countries.yaml"):
+        _engine.write(planned)
+    assert victim.read_text(encoding="utf-8") == "keep: me\n"
+    assert not (root / "code-lists").exists()
+
+    source.unlink()
+    source.write_text(_COUNTRIES, encoding="utf-8")
+    planned = _engine.plan(root)
+    _link(root / "code-lists", outside)  # the target's directory becomes a link
+    with pytest.raises(_engine.MigrateError, match="code-lists/countries.yaml"):
+        _engine.write(planned)
+    assert sorted(p.name for p in outside.iterdir()) == ["secret.yaml"]
+    assert source.is_file()
