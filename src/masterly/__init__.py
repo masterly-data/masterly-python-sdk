@@ -21,9 +21,12 @@ Two token personas connect. :class:`Client` is a signed-in person's session, sco
 Environment it names. :meth:`Client.for_service_account` is a machine: pinned to its own
 Environment, confined to the Sources its ``ingest`` scope names and the products its access
 principal may consume — the persona a scheduled load should hold. The README's "Two token
-personas" says how to get either one.
+personas" says how to get either one. Either takes its token as a string, or as a
+:class:`TokenProvider` that hands out an :class:`AccessToken` and is asked again shortly before
+it expires — the form for a connection that outlives one token.
 """
 
+from masterly._auth import AccessToken, TokenProvider, TokenProviderError
 from masterly._client import ApiError, ChangePending, Client, Persona
 from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, SourceTarget
@@ -38,6 +41,7 @@ from masterly._precondition import Conflict, Precondition
 __version__ = "0.9.0"
 
 __all__ = [
+    "AccessToken",
     "ApiError",
     "ChangeFeed",
     "ChangePending",
@@ -52,6 +56,8 @@ __all__ = [
     "QuarantineReason",
     "RowPages",
     "SourceTarget",
+    "TokenProvider",
+    "TokenProviderError",
     "WorkflowStartItem",
     "WorkflowStartResult",
     "WriteResult",

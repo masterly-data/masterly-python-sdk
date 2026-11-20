@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import httpx
 
+from masterly._auth import TokenProvider, _ProviderAuth
 from masterly._config import ConfigApi, DataModelsApi, DomainsApi, WorkspacesApi
 from masterly._extract import GoldenApi, ProductsApi
 from masterly._ingest import SourcesApi
@@ -123,34 +124,52 @@ class Client:
 
     Args:
         base_url: The install's URL, e.g. ``https://app.example.com``.
-        token: A session bearer token. For a machine credential use
-            :meth:`for_service_account` instead — it carries what that persona can and
-            cannot do.
+        token: A session bearer token, in either of two forms. A string is sent as it is on
+            every request — fine for a short script, but the connection stops working when
+            that token expires. A :class:`~masterly.TokenProvider` is asked for a token when
+            the connection needs one: its token is reused until shortly before its
+            ``expires_at`` and then fetched anew, so a long-running pipeline or notebook keeps
+            working. If the provider raises, the request is not sent and
+            :class:`~masterly.TokenProviderError` reaches you, chained from the provider's
+            exception. For a machine credential use :meth:`for_service_account` instead —
+            it carries what that persona can and cannot do.
         environment: The Environment id, e.g. ``env_prod_eu``. A session token must name
             one; leaving it out sends no ``X-Masterly-Environment`` header, which only the
             Organization-scoped endpoints (``/v1/environments``) and the service-account
             routes accept.
+        organization: The Organization id to act in, sent as ``X-Masterly-Organization`` on
+            every request. A token issued for a person rather than for one Organization does
+            not name one; when that person belongs to several, name the one you mean here.
+            Leave it out to send no such header.
+        transport: An httpx transport, for tests.
     """
 
     def __init__(
         self,
         base_url: str,
-        token: str,
+        token: str | TokenProvider,
         environment: str | None = None,
         *,
+        organization: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         from masterly import __version__
 
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "User-Agent": f"masterly-python/{__version__}",
-        }
+        headers: dict[str, str] = {}
+        auth: httpx.Auth | None = None
+        if isinstance(token, str):
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            auth = _ProviderAuth(token)
+        headers["User-Agent"] = f"masterly-python/{__version__}"
         if environment:
             headers["X-Masterly-Environment"] = environment
+        if organization:
+            headers["X-Masterly-Organization"] = organization
         self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
             headers=headers,
+            auth=auth,
             timeout=_TIMEOUT,
             transport=transport,
         )
@@ -159,6 +178,8 @@ class Client:
         #: The Environment named on the connection, or None (a service account is pinned to
         #: its own, and an Organization-scoped call names none).
         self.environment: str | None = environment or None
+        #: The Organization named on the connection, or None.
+        self.organization: str | None = organization or None
         self.products = ProductsApi(self)
         self.sources = SourcesApi(self)
         self.golden = GoldenApi(self)
@@ -174,9 +195,10 @@ class Client:
     def for_service_account(
         cls,
         base_url: str,
-        token: str,
+        token: str | TokenProvider,
         *,
         environment: str | None = None,
+        organization: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> Client:
         """Connect as a **service account** — the machine persona, for a scheduled load.
@@ -204,14 +226,21 @@ class Client:
 
         Args:
             base_url: The install's URL.
-            token: The service account's access token.
+            token: The service account's access token: a string, sent as it is until it
+                expires, or a :class:`~masterly.TokenProvider` that is asked for a fresh token
+                shortly before the one it last gave expires — the form for a job that runs
+                longer than a token lives. If the provider raises, the request is not sent
+                and :class:`~masterly.TokenProviderError` reaches you, chained from the
+                provider's exception.
             environment: Optional assertion. Leave it out and the account's own Environment is
                 used; pass one and the server refuses the call with
                 ``SERVICE_ACCOUNT_SCOPE_DENIED`` if the account is pinned elsewhere — useful
                 when a job must not silently load a different Environment than intended.
+            organization: The Organization id, sent as ``X-Masterly-Organization`` on every
+                request. Leave it out to send no such header.
             transport: An httpx transport, for tests.
         """
-        client = cls(base_url, token, environment, transport=transport)
+        client = cls(base_url, token, environment, organization=organization, transport=transport)
         client.persona = "service-account"
         return client
 
