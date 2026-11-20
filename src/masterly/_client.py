@@ -129,8 +129,9 @@ class Client:
             that token expires. A :class:`~masterly.TokenProvider` is asked for a token when
             the connection needs one: its token is reused until shortly before its
             ``expires_at`` and then fetched anew, so a long-running pipeline or notebook keeps
-            working. If the provider raises, the request is not sent and its exception
-            reaches you. For a machine credential use :meth:`for_service_account` instead —
+            working. If the provider raises, the request is not sent and
+            :class:`~masterly.TokenProviderError` reaches you, chained from the provider's
+            exception. For a machine credential use :meth:`for_service_account` instead —
             it carries what that persona can and cannot do.
         environment: The Environment id, e.g. ``env_prod_eu``. A session token must name
             one; leaving it out sends no ``X-Masterly-Environment`` header, which only the
@@ -229,7 +230,8 @@ class Client:
                 expires, or a :class:`~masterly.TokenProvider` that is asked for a fresh token
                 shortly before the one it last gave expires — the form for a job that runs
                 longer than a token lives. If the provider raises, the request is not sent
-                and its exception reaches you.
+                and :class:`~masterly.TokenProviderError` reaches you, chained from the
+                provider's exception.
             environment: Optional assertion. Leave it out and the account's own Environment is
                 used; pass one and the server refuses the call with
                 ``SERVICE_ACCOUNT_SCOPE_DENIED`` if the account is pinned elsewhere — useful

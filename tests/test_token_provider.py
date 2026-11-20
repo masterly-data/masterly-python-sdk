@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 import masterly
-from masterly import AccessToken, ApiError, Client
+from masterly import AccessToken, ApiError, Client, TokenProviderError
 from masterly import _auth as auth_module
 from masterly import _client as client_module
 from masterly._auth import _REFRESH_SKEW_SECONDS, _ProviderAuth
@@ -59,8 +59,10 @@ def _fake_clock(monkeypatch: pytest.MonkeyPatch, start: float = 0.0) -> list[flo
 def test_the_provider_types_are_exported() -> None:
     assert "TokenProvider" in masterly.__all__
     assert "AccessToken" in masterly.__all__
+    assert "TokenProviderError" in masterly.__all__
     assert masterly.TokenProvider is auth_module.TokenProvider
     assert masterly.AccessToken is auth_module.AccessToken
+    assert masterly.TokenProviderError is auth_module.TokenProviderError
 
 
 def test_a_session_client_sends_the_provider_token_as_bearer() -> None:
@@ -269,9 +271,10 @@ def test_the_token_never_appears_in_a_repr_an_error_or_a_log(
     with pytest.raises(ApiError) as rejected:
         client.request("GET", "/v1/x")
     now[0] = 2000.0
-    with pytest.raises(RuntimeError) as failed:
+    with pytest.raises(TokenProviderError) as failed:
         client.request("GET", "/v1/x")
 
+    assert isinstance(failed.value.__cause__, RuntimeError)
     assert provider.calls == 2
     exposed = [
         repr(client),
@@ -288,7 +291,7 @@ def test_the_token_never_appears_in_a_repr_an_error_or_a_log(
     assert all(ISSUED not in text for text in exposed)
 
 
-def test_a_failing_provider_sends_nothing_and_raises_its_own_error(
+def test_a_failing_provider_sends_nothing_and_raises_chained_from_its_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sleeps: list[float] = []
@@ -306,10 +309,37 @@ def test_a_failing_provider_sends_nothing_and_raises_its_own_error(
     provider = _Provider(Down("identity provider is down"))
     client = Client("https://x", provider, "env_test", transport=httpx.MockTransport(handler))
 
-    with pytest.raises(Down):
+    with pytest.raises(TokenProviderError) as read:
         client.request("GET", "/v1/x")
-    with pytest.raises(Down):
+    with pytest.raises(TokenProviderError) as write:
         client.sources.ingest("src_1", [{"key": "k1"}])
+    assert isinstance(read.value.__cause__, Down)
+    assert isinstance(write.value.__cause__, Down)
     assert calls == 0
     assert sleeps == []
     assert provider.calls == 2
+
+
+def test_a_provider_transport_error_is_not_retried_as_a_dropped_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module.time, "sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - never reached
+        nonlocal calls
+        calls += 1
+        return httpx.Response(202, json={"job_id": "job_1"})
+
+    # The provider's own HTTP call to its identity provider failed; a second ask would succeed.
+    provider = _Provider(httpx.ConnectError("idp unreachable"), AccessToken(ISSUED, FAR_FUTURE))
+    client = Client("https://x", provider, "env_test", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(TokenProviderError) as failed:
+        client.sources.ingest("src_1", [{"key": "k1"}])
+    assert isinstance(failed.value.__cause__, httpx.ConnectError)
+    assert not isinstance(failed.value, httpx.TransportError)
+    assert calls == 0
+    assert sleeps == []
+    assert provider.calls == 1

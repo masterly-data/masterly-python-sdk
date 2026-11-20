@@ -26,7 +26,7 @@ personas" says how to get either one. Either takes its token as a string, or as 
 it expires — the form for a connection that outlives one token.
 """
 
-from masterly._auth import AccessToken, TokenProvider
+from masterly._auth import AccessToken, TokenProvider, TokenProviderError
 from masterly._client import ApiError, ChangePending, Client, Persona
 from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, SourceTarget
@@ -57,6 +57,7 @@ __all__ = [
     "RowPages",
     "SourceTarget",
     "TokenProvider",
+    "TokenProviderError",
     "WorkflowStartItem",
     "WorkflowStartResult",
     "WriteResult",

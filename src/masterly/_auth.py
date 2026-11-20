@@ -52,16 +52,28 @@ class TokenProvider(Protocol):
                 issued = self._credential.get_token(self._scope)
                 return masterly.AccessToken(issued.token, float(issued.expires_on))
 
-    If ``get_token()`` raises, the request is not sent and the exception reaches the caller.
+    If ``get_token()`` raises, the request is not sent and :class:`TokenProviderError` is raised,
+    chained from the provider's exception (its ``__cause__``).
     """
 
     def get_token(self) -> AccessToken: ...
 
 
+class TokenProviderError(Exception):
+    """A :class:`TokenProvider` failed to issue a token, so the request was not sent.
+
+    The provider's own exception is the ``__cause__``. A failure to get a token is never taken
+    for a dropped connection: a write is not re-sent because the provider raised, even when what
+    it raised is an ``httpx`` transport error.
+    """
+
+
 class _ProviderAuth(httpx.Auth):
     """Attaches the provider's bearer to every request, re-sends included, fetching a new token
     when the cached one is within the refresh skew of expiring. Safe across threads: concurrent
-    requests on one client wait for a single fetch."""
+    requests on one client wait for a single fetch. A provider failure becomes a
+    :class:`TokenProviderError`, so the keyed-write retry, which re-sends on a transport error,
+    cannot mistake it for one."""
 
     def __init__(self, provider: TokenProvider, *, clock: Callable[[], float] = time.time) -> None:
         self._provider = provider
@@ -73,7 +85,12 @@ class _ProviderAuth(httpx.Auth):
         with self._lock:
             cached = self._cached
             if cached is None or self._clock() >= cached.expires_at - _REFRESH_SKEW_SECONDS:
-                cached = self._provider.get_token()
+                try:
+                    cached = self._provider.get_token()
+                except Exception as exc:
+                    # The provider's message is not copied: it is not ours to vouch for.
+                    named = type(self._provider).__name__
+                    raise TokenProviderError(f"{named} did not issue a token") from exc
                 self._cached = cached
             return cached.token
 
