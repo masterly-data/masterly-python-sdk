@@ -44,8 +44,8 @@ pandas = ["pandas>=2.0"]
 # the extra when it is missing.
 cli = ["ruamel.yaml>=0.18"]
 # `EntraCertificateCredential`, which signs its client assertion with the certificate's private
-# key. An extra so the base install gains no crypto dependency; `EntraFederatedCredential`
-# needs nothing from it. The floor is past CVE-2024-12797 (in the OpenSSL its wheels bundle).
+# key. An extra so the base install gains no crypto dependency. The floor is past
+# CVE-2024-12797 (in the OpenSSL its wheels bundle).
 entra = ["cryptography>=44.0.1"]
 
 [project.scripts]

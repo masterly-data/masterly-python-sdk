@@ -24,14 +24,13 @@ principal may consume — the persona a scheduled load should hold. The README's
 personas" says how to get either one. Either takes its token as a string, or as a
 :class:`TokenProvider` that hands out an :class:`AccessToken` and is asked again shortly before
 it expires — the form for a connection that outlives one token.
-:class:`EntraCertificateCredential` and :class:`EntraFederatedCredential` are such providers for
-a service identity: the client-credentials grant against one Entra tenant, proven with a
-certificate or a federated token.
+:class:`EntraCertificateCredential` is such a provider for a service identity: the
+client-credentials grant against one Entra tenant, proven with a certificate.
 """
 
 from masterly._auth import AccessToken, TokenProvider, TokenProviderError
 from masterly._client import ApiError, ChangePending, Client, Persona
-from masterly._entra import EntraCertificateCredential, EntraFederatedCredential
+from masterly._entra import EntraCertificateCredential
 from masterly._extract import ChangeFeed, RowPages
 from masterly._ingest import FullLoad, IngestMode, IngestReceipt, IngestReport, SourceTarget
 from masterly._pending import (
@@ -52,7 +51,6 @@ __all__ = [
     "Client",
     "Conflict",
     "EntraCertificateCredential",
-    "EntraFederatedCredential",
     "FullLoad",
     "IngestMode",
     "IngestReceipt",

@@ -1,5 +1,5 @@
-"""Entra client credentials: the token request each sends, where it may send it, and no secret
-in a repr, an error or a log. The test certificate is generated here; none is committed."""
+"""The Entra certificate credential: the token request it sends, where it may send it, and no
+secret in a repr, an error or a log. The test certificate is generated here; none is committed."""
 
 from __future__ import annotations
 
@@ -20,12 +20,7 @@ import httpx
 import pytest
 
 import masterly
-from masterly import (
-    Client,
-    EntraCertificateCredential,
-    EntraFederatedCredential,
-    TokenProviderError,
-)
+from masterly import Client, EntraCertificateCredential, TokenProviderError
 from masterly import _entra as entra_module
 
 TENANT = "72f988bf-86f1-41af-91ab-2d7cd011db47"
@@ -37,7 +32,6 @@ DISCOVERY = f"{ISSUER}/.well-known/openid-configuration"
 TOKEN_ENDPOINT = f"https://{HOST}/{TENANT}/oauth2/v2.0/token"
 API = "https://app.example.com"
 ISSUED = "issued-access-token-9b8a7c"
-FEDERATED = "federated-token-4d2e6f"
 PASSWORD = b"key-password-5e1f"
 JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 NOW = 1_800_000_000.0
@@ -157,22 +151,16 @@ def _certificate_credential(
     )
 
 
-def _federated_credential(entra: _Entra, **kwargs: Any) -> EntraFederatedCredential:
-    options: dict[str, Any] = {"assertion": lambda: FEDERATED, "clock": lambda: NOW, **kwargs}
-    return EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE, transport=entra.transport, **options)
-
-
-def test_the_entra_credentials_are_exported() -> None:
+def test_the_entra_credential_is_exported() -> None:
     assert "EntraCertificateCredential" in masterly.__all__
-    assert "EntraFederatedCredential" in masterly.__all__
     assert masterly.EntraCertificateCredential is entra_module.EntraCertificateCredential
-    assert masterly.EntraFederatedCredential is entra_module.EntraFederatedCredential
 
 
 def test_the_base_install_gains_no_dependency_and_the_entra_extra_adds_cryptography() -> None:
     pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
     assert re.search(r'^dependencies = \["httpx>=0\.27"\]$', pyproject, re.MULTILINE)
     assert re.search(r'^entra = \["cryptography>=[0-9.]+"\]$', pyproject, re.MULTILINE)
+    assert re.search(r'^dev = \[[^\]]*"cryptography>=[0-9.]+"', pyproject, re.MULTILINE)
 
 
 def test_the_certificate_credential_posts_one_client_credentials_form(
@@ -250,18 +238,6 @@ def test_key_text_taken_for_a_path_is_not_echoed(certificate: _Certificate) -> N
         assert body.splitlines()[0] not in str(error) + repr(error)
 
 
-def test_an_unreadable_federated_token_file_does_not_echo_its_bytes(tmp_path: Path) -> None:
-    token_file = tmp_path / "azure-identity-token"
-    token_file.write_bytes(b"\xff" + FEDERATED.encode("ascii"))
-    entra = _Entra()
-    credential = _federated_credential(entra, assertion=None, token_file=token_file)
-    with pytest.raises(RuntimeError, match="could not be read") as raised:
-        credential.get_token()
-    assert entra.token_requests == []
-    for error in _chain(raised.value):
-        assert FEDERATED not in str(error) + repr(error)
-
-
 def test_the_certificate_credential_without_cryptography_names_the_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -271,81 +247,20 @@ def test_the_certificate_credential_without_cryptography_names_the_extra(
 
 
 @pytest.mark.parametrize("expires_in", [3599, "3599"])
-def test_expires_at_is_the_clock_plus_expires_in(expires_in: int | str) -> None:
+def test_expires_at_is_the_clock_plus_expires_in(
+    expires_in: int | str, certificate: _Certificate
+) -> None:
     entra = _Entra(token_body=lambda form: {"access_token": ISSUED, "expires_in": expires_in})
-    issued = _federated_credential(entra, clock=lambda: 1_000.0).get_token()
+    issued = _certificate_credential(certificate, entra, clock=lambda: 1_000.0).get_token()
     assert issued.token == ISSUED
     assert issued.expires_at == 1_000.0 + 3599
 
 
-def test_the_federated_token_file_is_reread_on_every_acquisition(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    token_file = tmp_path / "azure-identity-token"
-    token_file.write_text("first-federated-token\n", encoding="utf-8")
-    monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", str(token_file))
-    monkeypatch.setitem(sys.modules, "cryptography", None)  # works without the extra
-    entra = _Entra()
-    credential = EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE, transport=entra.transport)
-
-    credential.get_token()
-    token_file.write_text("second-federated-token\n", encoding="utf-8")
-    credential.get_token()
-
-    forms = entra.forms()
-    assert [form["client_assertion"] for form in forms] == [
-        "first-federated-token",
-        "second-federated-token",
-    ]
-    for form in forms:
-        assert form["grant_type"] == "client_credentials"
-        assert form["client_id"] == CLIENT_ID
-        assert form["scope"] == SCOPE
-        assert form["client_assertion_type"] == JWT_BEARER
-
-
-def test_an_explicit_token_file_wins_over_the_environment(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("AZURE_FEDERATED_TOKEN_FILE", str(tmp_path / "not-this-one"))
-    token_file = tmp_path / "explicit"
-    token_file.write_text(FEDERATED, encoding="utf-8")
-    entra = _Entra()
-    EntraFederatedCredential(
-        TENANT, CLIENT_ID, SCOPE, token_file=token_file, transport=entra.transport
-    ).get_token()
-    assert entra.forms()[0]["client_assertion"] == FEDERATED
-
-
-def test_a_callable_supplies_the_federated_token_on_every_acquisition() -> None:
-    issued = iter(["callable-token-1", "callable-token-2"])
-    entra = _Entra()
-    credential = _federated_credential(entra, assertion=lambda: next(issued))
-    credential.get_token()
-    credential.get_token()
-    assert [form["client_assertion"] for form in entra.forms()] == [
-        "callable-token-1",
-        "callable-token-2",
-    ]
-    assert all(form["client_assertion_type"] == JWT_BEARER for form in entra.forms())
-
-
-def test_no_federated_token_source_is_a_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AZURE_FEDERATED_TOKEN_FILE", raising=False)
-    with pytest.raises(ValueError, match="AZURE_FEDERATED_TOKEN_FILE"):
-        EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE)
-
-
-@pytest.mark.parametrize("kind", ["certificate", "federated"])
 def test_a_service_account_client_sends_the_entra_token_and_the_organization(
-    kind: str, request: pytest.FixtureRequest
+    certificate: _Certificate,
 ) -> None:
     entra = _Entra()
-    credential = (
-        _certificate_credential(request.getfixturevalue("certificate"), entra)
-        if kind == "certificate"
-        else _federated_credential(entra)
-    )
+    credential = _certificate_credential(certificate, entra)
     client = Client.for_service_account(
         API, credential, organization="org_x", transport=entra.transport
     )
@@ -366,9 +281,8 @@ def _chain(error: BaseException) -> list[BaseException]:
     return seen
 
 
-@pytest.mark.parametrize("kind", ["certificate", "federated"])
 def test_no_secret_reaches_a_repr_an_error_or_a_log(
-    kind: str, request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture
+    certificate: _Certificate, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
 
@@ -381,14 +295,9 @@ def test_no_secret_reaches_a_repr_an_error_or_a_log(
         }
 
     entra = _Entra(token_status=400, token_body=refusal)
-    secrets = [ISSUED, FEDERATED]
-    if kind == "certificate":
-        certificate: _Certificate = request.getfixturevalue("certificate")
-        credential: Any = _certificate_credential(certificate, entra)
-        key_pem = certificate.key_pem.decode("ascii")
-        secrets += [PASSWORD.decode(), key_pem, key_pem.splitlines()[1]]
-    else:
-        credential = _federated_credential(entra)
+    credential = _certificate_credential(certificate, entra)
+    key_pem = certificate.key_pem.decode("ascii")
+    secrets = [ISSUED, PASSWORD.decode(), key_pem, key_pem.splitlines()[1]]
     client = Client.for_service_account(API, credential, transport=entra.transport)
 
     with pytest.raises(TokenProviderError) as raised:
@@ -408,7 +317,7 @@ def test_no_secret_reaches_a_repr_an_error_or_a_log(
         for text in exposed:
             assert secret not in text
     assert repr(credential) == (
-        f"{type(credential).__name__}(tenant_id={TENANT!r}, client_id={CLIENT_ID!r})"
+        f"EntraCertificateCredential(tenant_id={TENANT!r}, client_id={CLIENT_ID!r})"
     )
 
 
@@ -435,16 +344,23 @@ def test_no_secret_reaches_a_repr_an_error_or_a_log(
     ],
 )
 def test_a_discovery_document_that_is_not_the_tenants_sends_no_credential(
-    issuer: str, token_endpoint: str
+    issuer: str, token_endpoint: str, certificate: _Certificate
 ) -> None:
-    asked: list[int] = []
     entra = _Entra(document={"issuer": issuer, "token_endpoint": token_endpoint})
-    credential = _federated_credential(entra, assertion=lambda: asked.append(1) or FEDERATED)
+    credential = _certificate_credential(certificate, entra)
+    signed: list[bytes] = []
+    sign = credential._sign
+
+    def recording_sign(data: bytes) -> bytes:
+        signed.append(data)
+        return sign(data)
+
+    credential._sign = recording_sign
     with pytest.raises(RuntimeError, match="no credential was sent"):
         credential.get_token()
     assert len(entra.discoveries) == 1
     assert entra.token_requests == []
-    assert asked == []  # the federated token was not even read
+    assert signed == []  # no client assertion was even signed
 
 
 @pytest.mark.parametrize(
@@ -460,22 +376,24 @@ def test_a_discovery_document_that_is_not_the_tenants_sends_no_credential(
     ],
 )
 def test_a_tenant_or_authority_that_cannot_be_pinned_is_refused_at_construction(
-    tenant_id: str, authority_host: str
+    tenant_id: str, authority_host: str, certificate: _Certificate
 ) -> None:
     entra = _Entra()
     with pytest.raises(ValueError):
-        EntraFederatedCredential(
+        EntraCertificateCredential(
             tenant_id,
             CLIENT_ID,
             SCOPE,
-            assertion=lambda: FEDERATED,
+            certificate.cert_pem,
+            private_key=certificate.key_pem,
+            password=PASSWORD,
             authority_host=authority_host,
             transport=entra.transport,
         )
     assert entra.discoveries == entra.token_requests == []
 
 
-def test_an_https_authority_host_url_is_accepted() -> None:
+def test_an_https_authority_host_url_is_accepted(certificate: _Certificate) -> None:
     entra = _Entra()
-    credential = _federated_credential(entra, authority_host=f"https://{HOST}/")
+    credential = _certificate_credential(certificate, entra, authority_host=f"https://{HOST}/")
     assert credential.get_token().token == ISSUED

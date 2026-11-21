@@ -170,14 +170,14 @@ presents the access token it issues — Masterly verifies that token and maps th
 the account. Either way it goes in the `token` argument above.
 
 **Getting the token from Entra ID.** On an install signed in through Entra ID, the SDK runs that
-grant itself. Hand the client one of two credentials as its `token`; it fetches a token when it
-needs one and a fresh one shortly before that one expires. Both prove the app with something
-other than a client secret:
+grant itself. Hand the client an `EntraCertificateCredential` as its `token`; it fetches a token
+when it needs one and a fresh one shortly before that one expires. It proves the app with a
+certificate registered on it, not a client secret, and needs the extra:
+`pip install 'masterly[entra]'`.
 
 ```python
-from masterly import Client, EntraCertificateCredential, EntraFederatedCredential
+from masterly import Client, EntraCertificateCredential
 
-# A certificate registered on the app. Needs the extra: pip install 'masterly[entra]'
 token = EntraCertificateCredential(
     tenant_id="72f988bf-86f1-41af-91ab-2d7cd011db47",   # the tenant's GUID
     client_id="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",   # the app's client id
@@ -187,24 +187,14 @@ token = EntraCertificateCredential(
     password=None,                                      # the key's password, if it is encrypted
 )
 
-# A federated credential: a token the workload's own platform issues (Azure workload identity,
-# GitHub Actions OIDC). Read from AZURE_FEDERATED_TOKEN_FILE unless you pass token_file= or a
-# callable as assertion=; it is read again for every token request.
-token = EntraFederatedCredential(
-    tenant_id="72f988bf-86f1-41af-91ab-2d7cd011db47",
-    client_id="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
-    scope="api://masterly-prod/.default",
-)
-
 client = Client.for_service_account("https://app.example.com", token, organization="org_x")
 ```
 
-The certificate credential signs a short-lived client assertion (RS256, RFC 7523) with the
-certificate's private key. The federated credential needs no extra. Neither puts a token, an
-assertion, the key, its password or the federated token in an exception message, a `repr()` or
+The credential signs a short-lived client assertion (RS256, RFC 7523) with the certificate's
+private key. It puts no token, assertion, key or password in an exception message, a `repr()` or
 a log record.
 
-They send a credential only to the tenant you name. The `tenant_id` must be the GUID:
+It sends a credential only to the tenant you name. The `tenant_id` must be the GUID:
 `common`, `organizations`, `consumers` and domain names are refused when the credential is
 built, because no single issuer can be checked for them. On the first request the credential
 reads the tenant's `/.well-known/openid-configuration` from `login.microsoftonline.com` (or the

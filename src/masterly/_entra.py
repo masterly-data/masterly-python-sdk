@@ -1,8 +1,8 @@
-"""Entra ID client credentials for a service identity: a certificate or a federated credential.
+"""Entra ID client credentials for a service identity, proven with a certificate.
 
-Each is a :class:`~masterly.TokenProvider`. It runs the client-credentials grant against the
-token endpoint of one Entra tenant and hands the issued token to the client, which keeps it
-until shortly before it expires. Neither carries a client secret.
+The credential is a :class:`~masterly.TokenProvider`. It runs the client-credentials grant
+against the token endpoint of one Entra tenant and hands the issued token to the client, which
+keeps it until shortly before it expires. It carries no client secret.
 
 Where a credential goes is pinned before anything is sent. The tenant must be a GUID, because
 ``common``, ``organizations``, ``consumers`` or a domain name name no single issuer. The
@@ -11,15 +11,14 @@ https. Its ``issuer`` must be exactly ``https://<host>/<tenant>/v2.0``, and its
 ``token_endpoint`` must be https on that same host. A document that fails either check sends
 nothing.
 
-No access token, client assertion, private key, password or federated token reaches a repr, an
-exception message or a log record from here. Entra's ``error`` code is named when it refuses a
+No access token, client assertion, private key or password reaches a repr, an exception message
+or a log record from here. Entra's ``error`` code is named when it refuses a
 request; its description and the rest of the body are not repeated.
 """
 
 from __future__ import annotations
 
 import base64
-import functools
 import hashlib
 import json
 import os
@@ -49,7 +48,6 @@ _PEM_KEY = re.compile(
     rb"-----BEGIN (RSA |ENCRYPTED )?PRIVATE KEY-----.+?-----END (RSA |ENCRYPTED )?PRIVATE KEY-----",
     re.DOTALL,
 )
-_FEDERATED_FILE_ENV = "AZURE_FEDERATED_TOKEN_FILE"
 
 
 def _b64url(data: bytes) -> str:
@@ -97,7 +95,7 @@ def _json_object(response: httpx.Response) -> dict[str, Any] | None:
 
 
 class _EntraCredential:
-    """Discovery, its checks and the token request, shared by both credentials."""
+    """Discovery, its checks and the token request; a subclass supplies the client assertion."""
 
     def __init__(
         self,
@@ -225,15 +223,6 @@ def _pem(value: bytes | str | os.PathLike[str], what: str) -> bytes:
     raise ValueError(f"the {what} is neither PEM text nor a readable file")
 
 
-def _read_text(path: Path) -> str:
-    """The file's UTF-8 text. A decode error would carry the file's bytes, so it is not kept."""
-    try:
-        return path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeError):
-        pass
-    raise RuntimeError(f"the federated token file {path} could not be read as UTF-8 text")
-
-
 class EntraCertificateCredential(_EntraCredential):
     """A service identity's token from Entra ID, proven with a certificate.
 
@@ -334,64 +323,3 @@ class EntraCertificateCredential(_EntraCredential):
         )
         signature = self._sign(signing_input.encode("ascii"))
         return f"{signing_input}.{_b64url(signature)}"
-
-
-class EntraFederatedCredential(_EntraCredential):
-    """A service identity's token from Entra ID, proven with a federated token.
-
-    The federated token — issued to the workload by its own platform, e.g. a Kubernetes service
-    account token under Azure workload identity, or a GitHub Actions OIDC token — is the client
-    assertion. It is read afresh on every token request, because its issuer rotates it.
-
-    Args:
-        tenant_id: The Entra tenant's GUID.
-        client_id: The app registration's (or managed identity's) client id.
-        scope: The Masterly API's scope, ``<application id URI>/.default``.
-        token_file: The file the federated token is read from. Defaults to the path in
-            ``AZURE_FEDERATED_TOKEN_FILE``.
-        assertion: A callable returning the federated token, instead of a file.
-        authority_host: The Entra authority host. Use the default unless the tenant lives in a
-            national cloud.
-        transport: An httpx transport, for tests.
-        clock: Seconds since the epoch, for tests.
-    """
-
-    def __init__(
-        self,
-        tenant_id: str,
-        client_id: str,
-        scope: str,
-        *,
-        token_file: str | os.PathLike[str] | None = None,
-        assertion: Callable[[], str] | None = None,
-        authority_host: str = _DEFAULT_AUTHORITY_HOST,
-        transport: httpx.BaseTransport | None = None,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        super().__init__(
-            tenant_id,
-            client_id,
-            scope,
-            authority_host=authority_host,
-            transport=transport,
-            clock=clock,
-        )
-        if token_file is not None and assertion is not None:
-            raise ValueError("pass token_file or assertion, not both")
-        self._assertion: Callable[[], str]
-        if assertion is not None:
-            self._assertion = assertion
-        else:
-            path = token_file if token_file is not None else os.environ.get(_FEDERATED_FILE_ENV)
-            if not path:
-                raise ValueError(
-                    f"no federated token: pass token_file= or assertion=, or set "
-                    f"{_FEDERATED_FILE_ENV}"
-                )
-            self._assertion = functools.partial(_read_text, Path(path))
-
-    def _client_assertion(self, token_endpoint: str) -> str:
-        value = self._assertion().strip()
-        if not value:
-            raise RuntimeError("the federated token is empty")
-        return value
