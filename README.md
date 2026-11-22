@@ -169,6 +169,40 @@ account is an OAuth2 client there: your job runs the client-credentials grant ag
 presents the access token it issues — Masterly verifies that token and maps the client back to
 the account. Either way it goes in the `token` argument above.
 
+**Getting the token from Entra ID.** On an install signed in through Entra ID, the SDK runs that
+grant itself. Hand the client an `EntraCertificateCredential` as its `token`; it fetches a token
+when it needs one and a fresh one shortly before that one expires. It proves the app with a
+certificate registered on it, not a client secret, and needs the extra:
+`pip install 'masterly[entra]'`.
+
+```python
+from masterly import Client, EntraCertificateCredential
+
+token = EntraCertificateCredential(
+    tenant_id="72f988bf-86f1-41af-91ab-2d7cd011db47",   # the tenant's GUID
+    client_id="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",   # the app's client id
+    scope="api://masterly-prod/.default",               # the Masterly API's scope + /.default
+    certificate="/run/secrets/masterly-svc.pem",        # PEM bytes, or a path; may hold the key
+    private_key=None,                                   # the RSA key, if it is in its own file
+    password=None,                                      # the key's password, if it is encrypted
+)
+
+client = Client.for_service_account("https://app.example.com", token, organization="org_x")
+```
+
+The credential signs a short-lived client assertion (RS256, RFC 7523) with the certificate's
+private key. It puts no token, assertion, key or password in an exception message, a `repr()` or
+a log record.
+
+It sends a credential only to the tenant you name. The `tenant_id` must be the GUID:
+`common`, `organizations`, `consumers` and domain names are refused when the credential is
+built, because no single issuer can be checked for them. On the first request the credential
+reads the tenant's `/.well-known/openid-configuration` from `login.microsoftonline.com` (or the
+`authority_host=` of a national cloud, https only). It sends nothing unless that document's
+`issuer` is exactly `https://<host>/<tenant id>/v2.0` and its `token_endpoint` is https on the
+same host. When Entra refuses the request, the error names its code (`invalid_client`) and
+nothing from the request.
+
 **When it is refused.**
 
 | What happened | What comes back |
