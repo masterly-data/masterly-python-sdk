@@ -207,6 +207,7 @@ def write(plan_: Plan) -> None:
                 handle.write(data)
         except FileExistsError as exc:
             raise MigrateError(f"{change.path} appeared since the plan; not moved") from exc
+        # target is under the root the user named on the command line, and _guard checked it
         if target.read_bytes() != data:  # pragma: no cover - a disk that reads back differently
             raise MigrateError(f"{change.path} did not read back as written; kept the source")
         _guard(root, source)
