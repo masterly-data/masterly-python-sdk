@@ -194,6 +194,37 @@ The credential signs a short-lived client assertion (RS256, RFC 7523) with the c
 private key. It puts no token, assertion, key or password in an exception message, a `repr()` or
 a log record.
 
+**With a federated credential instead.** A workload that already holds a token from another
+identity provider the app registration trusts — AKS workload identity, a GitHub Actions OIDC
+job — can present that token in place of a certificate, with an `EntraFederatedCredential`.
+By default it reads the token from the file `AZURE_FEDERATED_TOKEN_FILE` names (AKS workload
+identity sets it), and it is an error to build one when that variable is unset. Or hand it a
+callable that returns the token — the form for a token you fetch yourself, such as a GitHub
+Actions OIDC token. The file is read again, or the callable asked again, each time
+the client fetches a fresh access token, so a token rotated in place is picked up.
+
+```python
+from masterly import Client, EntraFederatedCredential
+
+token = EntraFederatedCredential(
+    tenant_id="72f988bf-86f1-41af-91ab-2d7cd011db47",
+    client_id="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    scope="api://masterly-prod/.default",
+)   # reads the file AZURE_FEDERATED_TOKEN_FILE names
+
+token = EntraFederatedCredential(
+    tenant_id="72f988bf-86f1-41af-91ab-2d7cd011db47",
+    client_id="0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
+    scope="api://masterly-prod/.default",
+    assertion=fetch_oidc_token,                         # any callable returning the token as str
+)
+
+client = Client.for_service_account("https://app.example.com", token, organization="org_x")
+```
+
+It is pinned to the tenant exactly as the certificate credential is, below, and the federated
+token stays out of exception messages, `repr()` and log records as well.
+
 It sends a credential only to the tenant you name. The `tenant_id` must be the GUID:
 `common`, `organizations`, `consumers` and domain names are refused when the credential is
 built, because no single issuer can be checked for them. On the first request the credential

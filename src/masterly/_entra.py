@@ -1,8 +1,13 @@
-"""Entra ID client credentials for a service identity, proven with a certificate.
+"""Entra ID client credentials for a service identity, proven with a certificate or with a
+federated token.
 
-The credential is a :class:`~masterly.TokenProvider`. It runs the client-credentials grant
+Each credential is a :class:`~masterly.TokenProvider`. It runs the client-credentials grant
 against the token endpoint of one Entra tenant and hands the issued token to the client, which
-keeps it until shortly before it expires. It carries no client secret.
+keeps it until shortly before it expires. It carries no client secret. Its client assertion is
+either a JWT signed with a certificate's key (:class:`EntraCertificateCredential`, which needs
+``cryptography``) or a token another identity provider issued to the workload and the app
+trusts — read from the file ``AZURE_FEDERATED_TOKEN_FILE`` names, or got from a callable
+(:class:`EntraFederatedCredential`, which needs no extra).
 
 Where a credential goes is pinned before anything is sent. The tenant must be a GUID, because
 ``common``, ``organizations``, ``consumers`` or a domain name name no single issuer. The
@@ -11,8 +16,8 @@ https. Its ``issuer`` must be exactly ``https://<host>/<tenant>/v2.0``, and its
 ``token_endpoint`` must be https on that same host. A document that fails either check sends
 nothing.
 
-No access token, client assertion, private key or password reaches a repr, an exception message
-or a log record from here. Entra's ``error`` code is named when it refuses a
+No access token, client assertion, federated token, private key or password reaches a repr, an
+exception message or a log record from here. Entra's ``error`` code is named when it refuses a
 request; its description and the rest of the body are not repeated.
 """
 
@@ -37,6 +42,8 @@ from masterly._auth import AccessToken
 
 _DEFAULT_AUTHORITY_HOST = "login.microsoftonline.com"
 _JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+#: Names the file a federated token is read from (AKS workload identity sets it).
+_FEDERATED_FILE_ENV = "AZURE_FEDERATED_TOKEN_FILE"
 #: A client assertion is good for this long. Short, so a stolen one is soon worthless.
 _ASSERTION_LIFETIME_SECONDS = 300
 _TIMEOUT_SECONDS = 30.0
@@ -323,3 +330,79 @@ class EntraCertificateCredential(_EntraCredential):
         )
         signature = self._sign(signing_input.encode("ascii"))
         return f"{signing_input}.{_b64url(signature)}"
+
+
+class EntraFederatedCredential(_EntraCredential):
+    """A service identity's token from Entra ID, proven with a federated token.
+
+    The client assertion is a token another identity provider issued to the workload and the
+    app registration trusts through a federated identity credential — AKS workload identity,
+    a GitHub Actions OIDC job and the like. By default it is read from the file the
+    ``AZURE_FEDERATED_TOKEN_FILE`` environment variable names; ``assertion=`` hands in a
+    callable instead. Either is asked again on every token request, so a token rotated in place
+    is sent the next time the client refreshes its access token. Nothing is signed here, so no
+    extra is needed.
+
+    Args:
+        tenant_id: The Entra tenant's GUID.
+        client_id: The app registration's application (client) id.
+        scope: The Masterly API's scope, ``<application id URI>/.default``.
+        assertion: A callable that returns the federated token. Leave it out to read the file
+            ``AZURE_FEDERATED_TOKEN_FILE`` names; the variable is read once, here.
+        authority_host: The Entra authority host. Use the default unless the tenant lives in a
+            national cloud.
+        transport: An httpx transport, for tests.
+        clock: Seconds since the epoch, for tests.
+    """
+
+    def __init__(
+        self,
+        tenant_id: str,
+        client_id: str,
+        scope: str,
+        *,
+        assertion: Callable[[], str] | None = None,
+        authority_host: str = _DEFAULT_AUTHORITY_HOST,
+        transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        super().__init__(
+            tenant_id,
+            client_id,
+            scope,
+            authority_host=authority_host,
+            transport=transport,
+            clock=clock,
+        )
+        self._assertion = assertion
+        self._file: str | None = None
+        if assertion is None:
+            self._file = os.environ.get(_FEDERATED_FILE_ENV) or None
+            if self._file is None:
+                raise ValueError(
+                    f"{_FEDERATED_FILE_ENV} is not set — set it to the federated token's file, "
+                    "or pass assertion="
+                )
+
+    def _client_assertion(self, token_endpoint: str) -> str:
+        if self._assertion is not None:
+            value = self._assertion()
+            if not isinstance(value, str):
+                raise TypeError("the assertion callable must return the federated token as str")
+        else:
+            value = self._read_file()
+        token = value.strip()
+        if not token:
+            raise ValueError("the federated token is empty")
+        return token
+
+    def _read_file(self) -> str:
+        """The token file's content, re-read on every call. A failure does not repeat it."""
+        content = None
+        try:
+            content = Path(str(self._file)).read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            pass  # raised below, so the error holding the content is not left as context
+        if content is None:
+            raise RuntimeError(f"the file {_FEDERATED_FILE_ENV} names could not be read")
+        return content

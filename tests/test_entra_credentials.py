@@ -1,11 +1,14 @@
-"""The Entra certificate credential: the token request it sends, where it may send it, and no
-secret in a repr, an error or a log. The test certificate is generated here; none is committed."""
+"""The Entra credentials, certificate and federated: the token request each sends, where it may
+send it, and no secret in a repr, an error or a log. The test certificate is generated here; none
+is committed."""
 
 from __future__ import annotations
 
 import base64
 import datetime
+import functools
 import hashlib
+import importlib
 import json
 import logging
 import re
@@ -20,8 +23,15 @@ import httpx
 import pytest
 
 import masterly
-from masterly import Client, EntraCertificateCredential, TokenProviderError
+from masterly import (
+    Client,
+    EntraCertificateCredential,
+    EntraFederatedCredential,
+    TokenProviderError,
+)
+from masterly import _client as client_module
 from masterly import _entra as entra_module
+from masterly._auth import _REFRESH_SKEW_SECONDS, _ProviderAuth
 
 TENANT = "72f988bf-86f1-41af-91ab-2d7cd011db47"
 CLIENT_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
@@ -35,6 +45,9 @@ ISSUED = "issued-access-token-9b8a7c"
 PASSWORD = b"key-password-5e1f"
 JWT_BEARER = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
 NOW = 1_800_000_000.0
+FEDERATED_A = "federated-assertion-a-3c2b1a"
+FEDERATED_B = "federated-assertion-b-6f5e4d"
+FEDERATED_FILE_ENV = "AZURE_FEDERATED_TOKEN_FILE"
 
 
 @dataclass
@@ -321,28 +334,34 @@ def test_no_secret_reaches_a_repr_an_error_or_a_log(
     )
 
 
-@pytest.mark.parametrize(
-    ("issuer", "token_endpoint"),
-    [
-        pytest.param(
-            f"https://{HOST}/11111111-2222-3333-4444-555555555555/v2.0",
-            TOKEN_ENDPOINT,
-            id="another-tenants-issuer",
-        ),
-        pytest.param(
-            ISSUER, f"http://{HOST}/{TENANT}/oauth2/v2.0/token", id="http-token-endpoint"
-        ),
-        pytest.param(
-            ISSUER,
-            f"https://evil.example/{TENANT}/oauth2/v2.0/token",
-            id="foreign-host-token-endpoint",
-        ),
-        pytest.param(f"{ISSUER}/", TOKEN_ENDPOINT, id="issuer-with-trailing-slash"),
-        pytest.param(
-            ISSUER, f"https://{HOST}@evil.example/token", id="user-info-token-endpoint"
-        ),
-    ],
-)
+_FOREIGN_DISCOVERY = [
+    pytest.param(
+        f"https://{HOST}/11111111-2222-3333-4444-555555555555/v2.0",
+        TOKEN_ENDPOINT,
+        id="another-tenants-issuer",
+    ),
+    pytest.param(ISSUER, f"http://{HOST}/{TENANT}/oauth2/v2.0/token", id="http-token-endpoint"),
+    pytest.param(
+        ISSUER,
+        f"https://evil.example/{TENANT}/oauth2/v2.0/token",
+        id="foreign-host-token-endpoint",
+    ),
+    pytest.param(f"{ISSUER}/", TOKEN_ENDPOINT, id="issuer-with-trailing-slash"),
+    pytest.param(ISSUER, f"https://{HOST}@evil.example/token", id="user-info-token-endpoint"),
+]
+
+_UNPINNABLE = [
+    ("common", HOST),
+    ("organizations", HOST),
+    ("consumers", HOST),
+    ("contoso.onmicrosoft.com", HOST),
+    ("not-a-guid", HOST),
+    (TENANT, f"http://{HOST}"),
+    (TENANT, f"https://{HOST}/{TENANT}"),
+]
+
+
+@pytest.mark.parametrize(("issuer", "token_endpoint"), _FOREIGN_DISCOVERY)
 def test_a_discovery_document_that_is_not_the_tenants_sends_no_credential(
     issuer: str, token_endpoint: str, certificate: _Certificate
 ) -> None:
@@ -363,18 +382,7 @@ def test_a_discovery_document_that_is_not_the_tenants_sends_no_credential(
     assert signed == []  # no client assertion was even signed
 
 
-@pytest.mark.parametrize(
-    ("tenant_id", "authority_host"),
-    [
-        ("common", HOST),
-        ("organizations", HOST),
-        ("consumers", HOST),
-        ("contoso.onmicrosoft.com", HOST),
-        ("not-a-guid", HOST),
-        (TENANT, f"http://{HOST}"),
-        (TENANT, f"https://{HOST}/{TENANT}"),
-    ],
-)
+@pytest.mark.parametrize(("tenant_id", "authority_host"), _UNPINNABLE)
 def test_a_tenant_or_authority_that_cannot_be_pinned_is_refused_at_construction(
     tenant_id: str, authority_host: str, certificate: _Certificate
 ) -> None:
@@ -397,3 +405,265 @@ def test_an_https_authority_host_url_is_accepted(certificate: _Certificate) -> N
     entra = _Entra()
     credential = _certificate_credential(certificate, entra, authority_host=f"https://{HOST}/")
     assert credential.get_token().token == ISSUED
+
+
+# --- the federated credential ------------------------------------------------------------
+
+
+@pytest.fixture
+def token_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A federated token file, named by AZURE_FEDERATED_TOKEN_FILE as AKS workload identity does."""
+    path = tmp_path / "azure-identity-token"
+    path.write_text(f"  {FEDERATED_A}\n", encoding="utf-8")
+    monkeypatch.setenv(FEDERATED_FILE_ENV, str(path))
+    return path
+
+
+def _federated_credential(entra: _Entra, **kwargs: Any) -> EntraFederatedCredential:
+    options: dict[str, Any] = {"clock": lambda: NOW, **kwargs}
+    return EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE, transport=entra.transport, **options)
+
+
+def _counting(value: object = FEDERATED_A) -> tuple[Callable[[], Any], list[int]]:
+    calls: list[int] = []
+
+    def assertion() -> Any:
+        calls.append(1)
+        return value
+
+    return assertion, calls
+
+
+def test_the_federated_credential_is_exported() -> None:
+    assert "EntraFederatedCredential" in masterly.__all__
+    assert masterly.EntraFederatedCredential is entra_module.EntraFederatedCredential
+
+
+def test_the_federated_credential_posts_the_token_file_as_its_client_assertion(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entra = _Entra()
+    credential = _federated_credential(entra)
+    monkeypatch.delenv(FEDERATED_FILE_ENV)  # the path was resolved at construction
+    issued = credential.get_token()
+
+    assert issued.token == ISSUED
+    assert issued.expires_at == NOW + 3599
+    assert [str(r.url) for r in entra.discoveries] == [DISCOVERY]
+    assert len(entra.token_requests) == 1
+    request = entra.token_requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == TOKEN_ENDPOINT
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    assert _form(request) == {
+        "grant_type": "client_credentials",
+        "client_id": CLIENT_ID,
+        "scope": SCOPE,
+        "client_assertion_type": JWT_BEARER,
+        "client_assertion": FEDERATED_A,  # the file's content, surrounding whitespace stripped
+    }
+
+
+def test_a_callable_assertion_is_asked_on_every_request_and_the_file_is_never_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(FEDERATED_FILE_ENV, str(tmp_path / "does-not-exist"))
+    calls: list[int] = []
+
+    def assertion() -> str:
+        calls.append(1)
+        return f" federated-assertion-{len(calls)}\n"
+
+    entra = _Entra()
+    credential = _federated_credential(entra, assertion=assertion)
+    assert calls == []  # not asked at construction
+    credential.get_token()
+    credential.get_token()
+
+    assert len(calls) == 2
+    assert [form["client_assertion"] for form in entra.forms()] == [
+        "federated-assertion-1",
+        "federated-assertion-2",
+    ]
+    assert len(entra.discoveries) == 1
+
+    monkeypatch.delenv(FEDERATED_FILE_ENV)
+    assert _federated_credential(_Entra(), assertion=assertion).get_token().token == ISSUED
+
+
+def test_a_rewritten_token_file_is_sent_when_the_client_refreshes_its_token(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [NOW]
+    monkeypatch.setattr(
+        client_module, "_ProviderAuth", functools.partial(_ProviderAuth, clock=lambda: now[0])
+    )
+    entra = _Entra()
+    credential = _federated_credential(entra, clock=lambda: now[0])
+    client = Client.for_service_account(API, credential, transport=entra.transport)
+
+    client.request("GET", "/v1/x")
+    token_file.write_text(f"{FEDERATED_B}\n", encoding="utf-8")  # rotated in place
+    client.request("GET", "/v1/x")  # the cached access token is still good: no token request
+    assert [form["client_assertion"] for form in entra.forms()] == [FEDERATED_A]
+
+    now[0] = NOW + 3599 - _REFRESH_SKEW_SECONDS  # expires_at - the refresh skew
+    client.request("GET", "/v1/x")
+
+    assert [form["client_assertion"] for form in entra.forms()] == [FEDERATED_A, FEDERATED_B]
+    assert [r.headers["authorization"] for r in entra.api_requests] == [f"Bearer {ISSUED}"] * 3
+
+
+@pytest.mark.parametrize("value", [None, ""], ids=["unset", "empty"])
+def test_no_assertion_and_no_token_file_variable_is_refused_at_construction(
+    value: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if value is None:
+        monkeypatch.delenv(FEDERATED_FILE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(FEDERATED_FILE_ENV, value)
+    entra = _Entra()
+    with pytest.raises(ValueError, match=FEDERATED_FILE_ENV):
+        EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE, transport=entra.transport)
+    assert entra.discoveries == entra.token_requests == []
+
+
+@pytest.mark.parametrize(("tenant_id", "authority_host"), _UNPINNABLE)
+def test_a_federated_credential_that_cannot_be_pinned_is_refused_at_construction(
+    tenant_id: str, authority_host: str, token_file: Path
+) -> None:
+    entra = _Entra()
+    assertion, calls = _counting()
+    for options in ({}, {"assertion": assertion}):
+        with pytest.raises(ValueError):
+            EntraFederatedCredential(
+                tenant_id,
+                CLIENT_ID,
+                SCOPE,
+                authority_host=authority_host,
+                transport=entra.transport,
+                **options,
+            )
+    assert entra.discoveries == entra.token_requests == []
+    assert calls == []
+
+
+@pytest.mark.parametrize(("issuer", "token_endpoint"), _FOREIGN_DISCOVERY)
+def test_a_discovery_document_that_is_not_the_tenants_asks_for_no_federated_assertion(
+    issuer: str, token_endpoint: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entra = _Entra(document={"issuer": issuer, "token_endpoint": token_endpoint})
+    assertion, calls = _counting()
+    with pytest.raises(RuntimeError, match="no credential was sent"):
+        _federated_credential(entra, assertion=assertion).get_token()
+    assert len(entra.discoveries) == 1
+    assert entra.token_requests == []
+    assert calls == []  # the assertion was not even asked for
+
+    # Nor is the token file read: a missing one would raise "could not be read" instead.
+    monkeypatch.setenv(FEDERATED_FILE_ENV, str(tmp_path / "does-not-exist"))
+    with pytest.raises(RuntimeError, match="no credential was sent"):
+        _federated_credential(entra).get_token()
+    assert entra.token_requests == []
+
+
+def test_no_federated_token_reaches_a_repr_an_error_or_a_log(
+    token_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    def refusal(form: dict[str, str]) -> dict[str, Any]:
+        # Entra's body is not ours to repeat: plant the assertion the request carried in it.
+        return {
+            "error": "invalid_client",
+            "error_description": f"AADSTS700213: assertion {form['client_assertion']} rejected",
+            "access_token": ISSUED,
+        }
+
+    entra = _Entra(token_status=400, token_body=refusal)
+    credential = _federated_credential(entra)
+    client = Client.for_service_account(API, credential, transport=entra.transport)
+
+    with pytest.raises(TokenProviderError) as raised:
+        client.request("GET", "/v1/x")
+
+    assert entra.api_requests == []
+    assert entra.forms()[0]["client_assertion"] == FEDERATED_A
+    chain = _chain(raised.value)
+    assert len(chain) >= 2
+    assert "invalid_client" in str(chain[1])
+    assert "AADSTS700213" not in str(chain[1])
+    exposed = [repr(credential), caplog.text]
+    exposed += [str(error) for error in chain] + [repr(error) for error in chain]
+    exposed += [str(record.args) for record in caplog.records]
+    for secret in (FEDERATED_A, ISSUED):
+        for text in exposed:
+            assert secret not in text
+    assert repr(credential) == (
+        f"EntraFederatedCredential(tenant_id={TENANT!r}, client_id={CLIENT_ID!r})"
+    )
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [
+        pytest.param(lambda path: path.write_text("", encoding="utf-8"), id="empty"),
+        pytest.param(lambda path: path.write_text(" \n\t ", encoding="utf-8"), id="blank"),
+        pytest.param(
+            lambda path: path.write_bytes(b"\xff" + FEDERATED_A.encode("ascii")), id="not-utf-8"
+        ),
+        pytest.param(lambda path: path.unlink(), id="missing"),
+        pytest.param(lambda path: (path.unlink(), path.mkdir()), id="a-directory"),
+    ],
+)
+def test_an_empty_or_unreadable_token_file_is_refused_without_its_content(
+    spoil: Callable[[Path], object], token_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    spoil(token_file)
+    entra = _Entra()
+    credential = _federated_credential(entra)
+    with pytest.raises((ValueError, RuntimeError)) as raised:
+        credential.get_token()
+    assert entra.token_requests == []
+    assert raised.value.__context__ is None  # the error holding the content is not kept
+    assert raised.value.__cause__ is None
+    for error in _chain(raised.value):
+        assert FEDERATED_A not in str(error) + repr(error)
+    assert FEDERATED_A not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        pytest.param(" \n", ValueError, id="blank"),
+        pytest.param(42, TypeError, id="not-a-string"),
+        pytest.param(FEDERATED_A.encode("ascii"), TypeError, id="bytes"),
+    ],
+)
+def test_a_callable_that_returns_no_token_is_refused_without_repeating_it(
+    value: object, error: type[Exception]
+) -> None:
+    entra = _Entra()
+    assertion, calls = _counting(value)
+    with pytest.raises(error) as raised:
+        _federated_credential(entra, assertion=assertion).get_token()
+    assert calls == [1]
+    assert entra.token_requests == []
+    assert FEDERATED_A not in str(raised.value) + repr(raised.value)
+
+
+def test_the_federated_credential_needs_no_cryptography(
+    token_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(sys.modules, "cryptography", None)
+    for name in [n for n in sys.modules if n == "masterly" or n.startswith("masterly.")]:
+        monkeypatch.delitem(sys.modules, name)  # restored when the test ends
+    fresh = importlib.import_module("masterly")
+    assert fresh is not masterly
+    assert "EntraFederatedCredential" in fresh.__all__
+
+    entra = _Entra()
+    credential = fresh.EntraFederatedCredential(TENANT, CLIENT_ID, SCOPE, transport=entra.transport)
+    assert credential.get_token().token == ISSUED
+    assert entra.forms()[0]["client_assertion"] == FEDERATED_A
